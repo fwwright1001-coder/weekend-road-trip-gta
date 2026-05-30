@@ -636,3 +636,66 @@ body.colorblind {
   font-weight: 700;
   letter-spacing: 1px;
 }
+
+/* ============================================================
+   GTA systems HUD (crime-sandbox layer) — overlays #frame in on-foot mode.
+   All #gta-* scoped; toggled by gta/onfoot-bridge.js (no collision with foot-*).
+   ============================================================ */
+#gta-hud {
+  position: absolute; inset: 0; pointer-events: none; z-index: 22;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+#gta-radar {
+  position: absolute; left: 14px; bottom: 14px;
+  width: 168px; height: 168px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  background: rgba(10, 14, 20, 0.55);
+}
+.gta-stars {
+  position: absolute; top: 12px; right: 16px;
+  display: flex; gap: 4px; font-size: 26px; line-height: 1;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85);
+}
+.gta-stars .star { color: rgba(255, 255, 255, 0.18); transition: color .2s, transform .2s; }
+.gta-stars .star.lit { color: #f5d76e; transform: scale(1.08); }
+.gta-stars.flash .star.lit { animation: gtaStarFlash .5s steps(2) infinite; }
+@keyframes gtaStarFlash { 50% { color: #fff; } }
+.gta-money {
+  position: absolute; top: 48px; right: 16px;
+  font-size: 24px; font-weight: 700; color: #7ee27e;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85); letter-spacing: 0.5px;
+}
+.gta-money.bump { animation: gtaMoneyBump .35s ease; }
+@keyframes gtaMoneyBump { 0% { transform: scale(1); } 40% { transform: scale(1.18); } 100% { transform: scale(1); } }
+.gta-weaponbox { position: absolute; right: 16px; bottom: 16px; text-align: right; text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85); }
+.gta-weapon { font-size: 14px; letter-spacing: 2px; color: #cdd3dc; text-transform: uppercase; }
+.gta-ammo { font-size: 28px; font-weight: 800; color: #fff; }
+.gta-ammo.empty { color: #d83a3a; }
+.gta-vitals {
+  position: absolute; left: 14px; bottom: 190px;
+  display: flex; flex-direction: column; gap: 5px; width: 168px;
+}
+.gta-bar { height: 9px; border-radius: 5px; background: rgba(0, 0, 0, 0.45); overflow: hidden; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6); }
+.gta-bar i { display: block; height: 100%; width: 100%; transition: width .15s ease; }
+.gta-health i { background: linear-gradient(90deg, #e25555, #f1a04f); }
+.gta-armor i { background: linear-gradient(90deg, #5fa9e0, #8fd0ff); }
+.gta-objective {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  max-width: 66%; text-align: center;
+  background: rgba(12, 16, 24, 0.72); border-left: 3px solid #f5d76e;
+  padding: 8px 16px; border-radius: 4px; font-size: 14px; color: #f3f4f7;
+}
+.gta-objective b { color: #f5d76e; }
+.gta-toast {
+  position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%);
+  max-width: 78%; text-align: center;
+  background: rgba(12, 16, 24, 0.8); padding: 10px 18px; border-radius: 6px;
+  font-size: 13px; color: #e8eaef; line-height: 1.5;
+}
+.gta-toast b { color: #f5d76e; }
+/* While the GTA layer is active, suppress the legacy on-foot AMMO/DOWNED panel
+   (our HUD shows weapon/ammo + money). Robust against onfoot3d.updateHud() which
+   only toggles the element's own .hidden class, never the <body> class. */
+body.gta-active #foot-stats-foot { display: none !important; }

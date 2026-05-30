@@ -76,6 +76,7 @@ let initialized = false;
 let rafId = 0, lastT = 0;
 
 const keys = new Set();
+const justPressed = new Set();   // edge-pressed keys this frame (for an optional systems layer)
 let locked = false;          // pointer-lock engaged
 let yaw = 0, pitch = -0.12;  // camera orientation
 let recoil = 0;              // transient upward kick, decays each frame
@@ -137,29 +138,179 @@ function gunSound() {
 // A blocky "generic guy" — low-poly to match the road-trip art. Origin at the
 // feet (Y=0), ~1.8 tall. `armed` adds a pistol in the right hand.
 function buildPerson(colors, armed) {
+  // Rigged, animated model when the (optional) actor art loaded; else the
+  // procedural box-person below. Same contract: feet at origin, ~1.8 tall,
+  // facing +Z, userData.muzzle when armed, walk driven via animateWalk().
+  if (OF._makeActor) {
+    try {
+      const a = OF._makeActor({
+        armed,
+        colorize: armed ? null : colors.shirt,          // peds tinted toward their shirt colour for variety
+        scaleVar: 0.94 + Math.random() * 0.16,
+      });
+      if (a) return a;
+    } catch (e) { console.warn('[ONFOOT] actor build failed; procedural person', e); }
+  }
+
   const g = new THREE.Group();
-  const mk = (geo, col) => {
-    const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: col, roughness: 0.85 }));
+
+  // --- helpers (defensive: nothing here may throw in a way that kills render) ---
+  const mk = (geo, col, rough) => {
+    const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: col, roughness: rough == null ? 0.85 : rough }));
     m.castShadow = true; m.receiveShadow = true; return m;
   };
+  // Capsule whose TOP (the joint) sits at the mesh's local origin, so a parent
+  // rotation.x reads as a swing pivoting from the shoulder/hip. `len` is the
+  // straight section between the two hemispherical caps; total length = len + 2*r.
+  const limbCapsule = (r, len) => {
+    let geo;
+    try { geo = new THREE.CapsuleGeometry(r, len, 4, 10); }
+    catch (e) { geo = new THREE.CylinderGeometry(r, r, len + r * 2, 10); } // r0.170 has Capsule, but fall back just in case
+    // shift down so the top cap apex is at y=0 (the pivot)
+    geo.translate(0, -(len / 2 + r), 0);
+    return geo;
+  };
   const skin = colors.skin, shirt = colors.shirt, pants = colors.pants, hair = colors.hair;
-  const legL = mk(new THREE.BoxGeometry(0.26, 0.8, 0.28), pants); legL.position.set(-0.16, 0.4, 0);
-  const legR = mk(new THREE.BoxGeometry(0.26, 0.8, 0.28), pants); legR.position.set(0.16, 0.4, 0);
-  const torso = mk(new THREE.BoxGeometry(0.62, 0.72, 0.36), shirt); torso.position.set(0, 1.16, 0);
-  const armL = mk(new THREE.BoxGeometry(0.18, 0.66, 0.2), shirt); armL.position.set(-0.42, 1.18, 0);
-  const armR = mk(new THREE.BoxGeometry(0.18, 0.66, 0.2), shirt); armR.position.set(0.42, 1.18, 0);
-  const head = mk(new THREE.BoxGeometry(0.34, 0.36, 0.34), skin); head.position.set(0, 1.72, 0);
-  const cap = mk(new THREE.BoxGeometry(0.36, 0.14, 0.36), hair); cap.position.set(0, 1.94, 0);
-  g.add(legL, legR, torso, armL, armR, head, cap);
+
+  // tiny per-spawn cosmetic variety (build / height)
+  const sx = 0.92 + Math.random() * 0.20;   // girth
+  const sy = 0.96 + Math.random() * 0.12;   // height
+  const build = 0.9 + Math.random() * 0.22; // limb chunkiness
+  const shoe = 0x2b2b30;
+
+  // ============================================================
+  // LEGS — animated mesh is the UPPER leg; its capsule top sits at the hip
+  // joint so animateWalk's rotation.x swings the whole leg from the hip.
+  // Lower leg + shoe are children that swing along.
+  // ============================================================
+  const mkLeg = (sign) => {
+    const hipY = 0.92;                       // hip joint height
+    const thighLen = 0.30, thighR = 0.115 * build;
+    const up = mk(limbCapsule(thighR, thighLen), pants);
+    up.position.set(sign * 0.13, hipY, 0);   // pivot AT the hip
+
+    const kneeY = -(thighLen + thighR * 2);  // bottom of thigh (local to up)
+    const shinLen = 0.28, shinR = 0.095 * build;
+    const lo = mk(limbCapsule(shinR, shinLen), pants);
+    lo.position.set(0, kneeY + thighR * 0.4, 0.005); // slight overlap at knee
+    up.add(lo);
+
+    // rounded shoe: squashed sphere + a small toe cap, toe forward (+Z)
+    const ankleY = -(shinLen + shinR * 2) + shinR * 0.3;
+    const foot = mk(new THREE.SphereGeometry(0.12, 12, 10), shoe, 0.55);
+    foot.scale.set(0.95, 0.55, 1.7);
+    foot.position.set(0, ankleY - 0.02, 0.07);
+    lo.add(foot);
+    const toe = mk(new THREE.SphereGeometry(0.08, 10, 8), shoe, 0.55);
+    toe.scale.set(1.0, 0.7, 1.0);
+    toe.position.set(0, ankleY - 0.03, 0.19);
+    lo.add(toe);
+    return up;
+  };
+  const legL = mkLeg(-1), legR = mkLeg(1);
+
+  // ============================================================
+  // HIPS + TORSO — capsules give a rounded, tapered trunk
+  // ============================================================
+  const hips = mk(limbCapsule(0.20 * build, 0.10), pants);
+  hips.position.set(0, 1.10, 0); hips.scale.set(1.25, 1.0, 0.85);
+
+  // torso capsule: shoulders ~1.66, taper handled by slight scale
+  const torsoLen = 0.42, torsoR = 0.21 * build;
+  const torso = mk(limbCapsule(torsoR, torsoLen), shirt);
+  // place so its top (shoulder line) is around Y=1.70
+  torso.position.set(0, 1.70, 0); torso.scale.set(1.18, 1.0, 0.78);
+
+  // chest/upper-pec swell for a less tubular silhouette
+  const chest = mk(new THREE.SphereGeometry(0.20 * build, 14, 12), shirt);
+  chest.scale.set(1.3, 0.7, 0.85); chest.position.set(0, 1.55, 0.03);
+
+  // shoulder caps (gentle taper into the arms)
+  const shoulderGeo = new THREE.SphereGeometry(0.11 * build, 12, 10);
+  const shL = mk(shoulderGeo, shirt); shL.position.set(-0.27, 1.66, 0);
+  const shR = mk(shoulderGeo, shirt); shR.position.set(0.27, 1.66, 0);
+
+  // ============================================================
+  // NECK + HEAD + FACE
+  // ============================================================
+  const neck = mk(limbCapsule(0.075, 0.06), skin); neck.position.set(0, 1.86, 0);
+
+  const head = mk(new THREE.SphereGeometry(0.165, 18, 16), skin);
+  head.scale.set(0.95, 1.08, 1.0);          // slightly squashed / elongated jaw
+  head.position.set(0, 2.02, 0);
+
+  // hair cap — scaled sphere clipped to the upper/back skull
+  const cap = mk(new THREE.SphereGeometry(0.172, 16, 14), hair, 0.92);
+  cap.scale.set(1.02, 0.85, 1.05);
+  cap.position.set(0, 0.04, -0.012); head.add(cap);
+  // fringe/bangs over the forehead
+  const bang = mk(new THREE.SphereGeometry(0.10, 12, 8), hair, 0.92);
+  bang.scale.set(1.5, 0.5, 0.6); bang.position.set(0, 0.06, 0.13); head.add(bang);
+
+  // ears
+  const earGeo = new THREE.SphereGeometry(0.045, 8, 8);
+  const earL = mk(earGeo, skin); earL.scale.set(0.6, 1.2, 1.0); earL.position.set(-0.155, 0.0, 0); head.add(earL);
+  const earR = mk(earGeo, skin); earR.scale.set(0.6, 1.2, 1.0); earR.position.set(0.155, 0.0, 0); head.add(earR);
+
+  // eyes (whites + pupils) on the +Z face
+  const eyeGeo = new THREE.SphereGeometry(0.032, 10, 8);
+  const eyeL = mk(eyeGeo, 0xf4f4f4, 0.35); eyeL.scale.set(1.1, 0.8, 0.6); eyeL.position.set(-0.06, 0.025, 0.145); head.add(eyeL);
+  const eyeR = mk(eyeGeo, 0xf4f4f4, 0.35); eyeR.scale.set(1.1, 0.8, 0.6); eyeR.position.set(0.06, 0.025, 0.145); head.add(eyeR);
+  const pupGeo = new THREE.SphereGeometry(0.016, 8, 8);
+  const pupL = mk(pupGeo, 0x1a1a22, 0.3); pupL.position.set(-0.06, 0.02, 0.165); head.add(pupL);
+  const pupR = mk(pupGeo, 0x1a1a22, 0.3); pupR.position.set(0.06, 0.02, 0.165); head.add(pupR);
+
+  // brows (thin rounded bars), nose (capsule), mouth (squashed sphere)
+  const browGeo = new THREE.SphereGeometry(0.04, 8, 6);
+  const browL = mk(browGeo, hair, 0.9); browL.scale.set(1.3, 0.35, 0.5); browL.position.set(-0.06, 0.075, 0.15); head.add(browL);
+  const browR = mk(browGeo, hair, 0.9); browR.scale.set(1.3, 0.35, 0.5); browR.position.set(0.06, 0.075, 0.15); head.add(browR);
+  const nose = mk(limbCapsule(0.028, 0.05), skin); nose.rotation.x = Math.PI; nose.position.set(0, 0.05, 0.155); head.add(nose);
+  const mouth = mk(new THREE.SphereGeometry(0.05, 10, 6), 0x7a3b3b, 0.55); mouth.scale.set(1.1, 0.35, 0.4); mouth.position.set(0, -0.085, 0.145); head.add(mouth);
+
+  // ============================================================
+  // ARMS — animated mesh is the UPPER arm; capsule top sits at the shoulder
+  // joint so rotation.x swings from the shoulder. Forearm + hand are children.
+  // ============================================================
+  const mkArm = (sign) => {
+    const shoulderY = 1.66;
+    const upperLen = 0.26, upperR = 0.075 * build;
+    const up = mk(limbCapsule(upperR, upperLen), shirt);
+    up.position.set(sign * 0.27, shoulderY, 0); // pivot AT the shoulder
+
+    const elbowY = -(upperLen + upperR * 2);
+    const foreLen = 0.24, foreR = 0.062 * build;
+    const lo = mk(limbCapsule(foreR, foreLen), skin); // rolled-sleeve forearm -> skin
+    lo.position.set(0, elbowY + upperR * 0.4, 0.004);
+    up.add(lo);
+
+    const wristY = -(foreLen + foreR * 2) + foreR * 0.2;
+    const hand = mk(new THREE.SphereGeometry(0.07, 12, 10), skin);
+    hand.scale.set(0.85, 1.15, 0.7);
+    hand.position.set(0, wristY - 0.01, 0.01);
+    lo.add(hand);
+    return up;
+  };
+  const armL = mkArm(-1), armR = mkArm(1);
+
+  g.add(legL, legR, hips, torso, chest, shL, shR, neck, head, armL, armR);
   g.userData.armL = armL; g.userData.armR = armR; g.userData.legL = legL; g.userData.legR = legR;
+
   if (armed) {
-    // raise the right arm forward and clip a little pistol to the hand
-    armR.position.set(0.42, 1.34, 0.18); armR.rotation.x = -1.35;
-    const gun = mk(new THREE.BoxGeometry(0.12, 0.16, 0.4), 0x222228); gun.position.set(0.42, 1.28, 0.5);
-    const muzzle = new THREE.Object3D(); muzzle.position.set(0.42, 1.32, 0.72); g.add(muzzle);
-    g.add(gun);
+    // raise the right arm forward and clip a little pistol near the right hand
+    armR.position.set(0.27, 1.62, 0.06); armR.rotation.x = -1.35;
+    const gun = new THREE.Group();
+    const slide = mk(new THREE.BoxGeometry(0.08, 0.10, 0.30), 0x222228, 0.45); slide.position.set(0, 0.02, 0.06); gun.add(slide);
+    const barrel = mk(new THREE.CylinderGeometry(0.022, 0.022, 0.10, 8), 0x2a2a30, 0.4);
+    barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.02, 0.24); gun.add(barrel);
+    const grip = mk(new THREE.BoxGeometry(0.07, 0.16, 0.10), 0x18181c, 0.45); grip.position.set(0, -0.10, -0.05); grip.rotation.x = 0.25; gun.add(grip);
+    gun.position.set(0.30, 1.30, 0.5);
+    const muzzle = new THREE.Object3D(); muzzle.position.set(0.30, 1.34, 0.72);
+    g.add(gun, muzzle);
     g.userData.muzzle = muzzle; g.userData.gun = gun;
   }
+
+  // subtle per-spawn body-shape variety (scale the whole rig; feet stay at Y=0)
+  g.scale.set(sx, sy, sx);
   return g;
 }
 
@@ -198,34 +349,152 @@ function buildBuilding(rng) {
 // Returns { group, wheels[] }. wheels[0..1] front, [2..3] rear (for steer/spin).
 function buildCarMesh(bodyColor) {
   const g = new THREE.Group();
-  const body = new THREE.MeshPhysicalMaterial({ color: bodyColor, roughness: 0.34, metalness: 0.0, clearcoat: 0.8, clearcoatRoughness: 0.25 });
+  const PI = Math.PI;
+
+  // --- materials ---
+  const body = new THREE.MeshPhysicalMaterial({ color: bodyColor, roughness: 0.3, metalness: 0.3, clearcoat: 0.9, clearcoatRoughness: 0.18 });
+  const trim = new THREE.MeshStandardMaterial({ color: 0x14141a, roughness: 0.55, metalness: 0.1 }); // black plastic trim / rockers
   const dark = new THREE.MeshStandardMaterial({ color: 0x1b1b20, roughness: 0.7 });
-  const chrome = new THREE.MeshStandardMaterial({ color: 0xc8ccd2, metalness: 0.85, roughness: 0.3 });
-  const glass = new THREE.MeshPhysicalMaterial({ color: 0x9fc4d8, roughness: 0.1, transparent: true, opacity: 0.5 });
-  const tail = new THREE.MeshStandardMaterial({ color: 0xff3838, emissive: 0xcc1010, emissiveIntensity: 1.1, roughness: 0.4 });
-  const lamp = new THREE.MeshStandardMaterial({ color: 0xfff3c0, emissive: 0xfff0b0, emissiveIntensity: 1.2 });
-  const hull = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.6, 4.1), body); hull.position.y = 0.62;
-  const hood = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.32, 1.5), body); hood.position.set(0, 0.86, -1.25);
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.62, 1.7), body); cabin.position.set(0, 1.12, 0.2);
-  const rear = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.4, 1.2), body); rear.position.set(0, 0.9, 1.35);
-  const sill = new THREE.Mesh(new THREE.BoxGeometry(2.08, 0.28, 3.4), dark); sill.position.y = 0.4;
-  const wind = new THREE.Mesh(new THREE.BoxGeometry(1.55, 0.5, 0.08), glass); wind.position.set(0, 1.32, -0.66); wind.rotation.x = -0.35;
-  const tl1 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.08), tail); tl1.position.set(-0.6, 0.78, 2.06);
-  const tl2 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.08), tail); tl2.position.set(0.6, 0.78, 2.06);
-  const hl1 = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.2, 0.08), lamp); hl1.position.set(-0.62, 0.78, -2.06);
-  const hl2 = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.2, 0.08), lamp); hl2.position.set(0.62, 0.78, -2.06);
-  const bumperF = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.18, 0.14), chrome); bumperF.position.set(0, 0.5, -2.06);
-  const bumperR = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.18, 0.14), chrome); bumperR.position.set(0, 0.5, 2.06);
-  g.add(sill, hull, hood, cabin, rear, wind, tl1, tl2, hl1, hl2, bumperF, bumperR);
-  // wheels — front pair (-Z) then rear pair (+Z); axle is along X so they roll on Z.
-  // Front wheels live inside a steer-pivot Group so steer (pivot.rotation.y) and roll
-  // (wheel.rotation.x) compose cleanly instead of precessing under one Euler order.
-  const wheelGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.38, 16); wheelGeo.rotateZ(Math.PI / 2);
+  const chrome = new THREE.MeshStandardMaterial({ color: 0xc8ccd2, metalness: 0.9, roughness: 0.22 });
+  const grilleMat = new THREE.MeshStandardMaterial({ color: 0x202024, metalness: 0.5, roughness: 0.45 });
+  const glass = new THREE.MeshPhysicalMaterial({ color: 0x9fc4d8, roughness: 0.06, metalness: 0.0, transmission: 0.55, transparent: true, opacity: 0.5, clearcoat: 1.0, ior: 1.45 });
+  const tail = new THREE.MeshStandardMaterial({ color: 0xff3838, emissive: 0xcc1010, emissiveIntensity: 1.1, roughness: 0.35 });
+  const lamp = new THREE.MeshStandardMaterial({ color: 0xfff3c0, emissive: 0xfff0b0, emissiveIntensity: 1.2, roughness: 0.25 });
+  const lensMat = new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.05, metalness: 0.0, transmission: 0.4, transparent: true, opacity: 0.55, clearcoat: 1.0 });
+  const hubMat = new THREE.MeshStandardMaterial({ color: 0xd7dade, metalness: 0.9, roughness: 0.26 });
   const tireMat = new THREE.MeshStandardMaterial({ color: 0x111116, roughness: 0.9 });
+
+  // Helper: a rounded "soft box" via a capsule squashed on its length axis still
+  // reads boxy; instead we round real boxes by stacking the box with thin chamfer
+  // rails along its top edges. capsule(): a horizontal capsule used for hull/roof
+  // curvature. Falls back to a plain box if CapsuleGeometry is unavailable.
+  function softHull(w, h, d, mat, segCap) {
+    // Body hull as a capsule laid along Z (rounds nose+tail+sides), scaled to size.
+    try {
+      const r = Math.min(w, h) * 0.5;
+      const len = Math.max(0.01, d - 2 * r);
+      const cap = new THREE.CapsuleGeometry(r, len, 4, segCap || 12);
+      // Capsule's long axis is Y; rotate so length runs along Z.
+      cap.rotateX(PI / 2);
+      const m = new THREE.Mesh(cap, mat);
+      // squash the round cross-section into the body's W x H footprint
+      m.scale.set(w / (2 * r), h / (2 * r), 1);
+      return m;
+    } catch (e) {
+      return new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    }
+  }
+
+  // nose is -Z, tail is +Z (matches headlights at -Z, taillights at +Z)
+  // --- main painted hull: rounded capsule core (sides/nose/tail curved) ---
+  const hull = softHull(1.96, 0.74, 4.0, body, 16); hull.position.y = 0.7;
+  // belt-line filler box keeps a solid silhouette under the capsule curve
+  const belt = new THREE.Mesh(new THREE.BoxGeometry(1.82, 0.42, 3.62), body); belt.position.y = 0.62;
+  // sloped hood + trunk give the long curved profile
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(1.78, 0.26, 1.5), body); hood.position.set(0, 0.96, -1.22); hood.rotation.x = -0.1;
+  const trunk = new THREE.Mesh(new THREE.BoxGeometry(1.82, 0.3, 1.1), body); trunk.position.set(0, 0.95, 1.42); trunk.rotation.x = 0.09;
+
+  // --- curved cabin / greenhouse: capsule roof (rounded) over a tapered base ---
+  const cabinBase = new THREE.Mesh(new THREE.BoxGeometry(1.72, 0.5, 1.96), body); cabinBase.position.set(0, 1.06, 0.06);
+  const roof = softHull(1.52, 0.5, 1.78, body, 12); roof.position.set(0, 1.4, 0.12);
+  // A-pillar / windshield-frame chamfer fillers to soften the cabin-to-hood join
+  const cowl = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.2, 0.34), body); cowl.position.set(0, 1.14, -0.86); cowl.rotation.x = -0.45;
+
+  // --- rockers / lower side cladding + underbody ---
+  const rockerL = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.24, 3.0), trim); rockerL.position.set(-0.96, 0.46, 0.05);
+  const rockerR = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.24, 3.0), trim); rockerR.position.set(0.96, 0.46, 0.05);
+  const underTray = new THREE.Mesh(new THREE.BoxGeometry(1.86, 0.2, 3.3), dark); underTray.position.y = 0.4;
+
+  // --- glass: curved windshield, rear glass, side windows (physical, transparent) ---
+  const wind = new THREE.Mesh(new THREE.BoxGeometry(1.46, 0.5, 0.05), glass); wind.position.set(0, 1.32, -0.7); wind.rotation.x = -0.46;
+  const rearGlass = new THREE.Mesh(new THREE.BoxGeometry(1.46, 0.44, 0.05), glass); rearGlass.position.set(0, 1.32, 0.9); rearGlass.rotation.x = 0.46;
+  const sideGlassL = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.32, 1.46), glass); sideGlassL.position.set(-0.78, 1.34, 0.12);
+  const sideGlassR = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.32, 1.46), glass); sideGlassR.position.set(0.78, 1.34, 0.12);
+
+  // --- front face: grille + rounded headlights (sphere base + clear lens) ---
+  const grille = new THREE.Mesh(new THREE.BoxGeometry(1.08, 0.26, 0.06), grilleMat); grille.position.set(0, 0.68, -2.0);
+  const grilleBar1 = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.022, 6, 20, PI), chrome); grilleBar1.position.set(0, 0.74, -2.0); grilleBar1.rotation.z = PI; grilleBar1.scale.set(1.05, 0.32, 1);
+  const hl1 = new THREE.Mesh(new THREE.SphereGeometry(0.16, 14, 10), lamp); hl1.position.set(-0.66, 0.78, -1.98); hl1.scale.set(1.3, 0.78, 0.6);
+  const hl2 = new THREE.Mesh(new THREE.SphereGeometry(0.16, 14, 10), lamp); hl2.position.set(0.66, 0.78, -1.98); hl2.scale.set(1.3, 0.78, 0.6);
+  const hlLensL = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 8), lensMat); hlLensL.position.set(-0.66, 0.78, -2.0); hlLensL.scale.set(1.3, 0.8, 0.45);
+  const hlLensR = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 8), lensMat); hlLensR.position.set(0.66, 0.78, -2.0); hlLensR.scale.set(1.3, 0.8, 0.45);
+
+  // --- rear face: rounded tail lights (emissive) + chrome strip ---
+  const tl1 = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 8), tail); tl1.position.set(-0.64, 0.82, 1.98); tl1.scale.set(1.5, 0.85, 0.5);
+  const tl2 = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 8), tail); tl2.position.set(0.64, 0.82, 1.98); tl2.scale.set(1.5, 0.85, 0.5);
+  const tlBar = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.04, 0.05), chrome); tlBar.position.set(0, 0.82, 2.0);
+
+  // --- rounded bumpers (capsule-profile) + chrome lips ---
+  const bumperF = softHull(1.94, 0.26, 0.34, trim, 8); bumperF.position.set(0, 0.46, -2.0);
+  const bumperFlip = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.05, 0.08), chrome); bumperFlip.position.set(0, 0.36, -2.08);
+  const bumperR = softHull(1.94, 0.26, 0.34, trim, 8); bumperR.position.set(0, 0.46, 2.0);
+  const bumperRlip = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.05, 0.08), chrome); bumperRlip.position.set(0, 0.36, 2.08);
+
+  // --- pronounced wheel arches (torus flares) over each wheel ---
+  function makeArch(x, z) {
+    const arch = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.1, 8, 18, PI), trim);
+    arch.position.set(x, 0.56, z);
+    arch.rotation.y = PI / 2;          // open the arch toward the side
+    arch.scale.set(1, 1, 0.55);        // flatten against the flank
+    return arch;
+  }
+  const archFL = makeArch(-0.99, -1.4), archFR = makeArch(0.99, -1.4);
+  const archRL = makeArch(-0.99, 1.45), archRR = makeArch(0.99, 1.45);
+
+  // --- side mirrors (rounded pods) ---
+  const mirrorL = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), body); mirrorL.position.set(-1.04, 1.14, -0.5); mirrorL.scale.set(1, 0.85, 1.3);
+  const mirrorR = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), body); mirrorR.position.set(1.04, 1.14, -0.5); mirrorR.scale.set(1, 0.85, 1.3);
+  const mirrorLglass = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.08, 0.13), glass); mirrorLglass.position.set(-1.12, 1.14, -0.5);
+  const mirrorRglass = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.08, 0.13), glass); mirrorRglass.position.set(1.12, 1.14, -0.5);
+
+  // --- chrome belt-line trim + door-seam hints on each flank ---
+  const beltTrimL = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.03, 2.4), chrome); beltTrimL.position.set(-0.95, 0.92, 0.1);
+  const beltTrimR = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.03, 2.4), chrome); beltTrimR.position.set(0.95, 0.92, 0.1);
+  const seamL = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.4, 0.025), trim); seamL.position.set(-0.96, 0.74, 0.55);
+  const seamR = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.4, 0.025), trim); seamR.position.set(0.96, 0.74, 0.55);
+
+  g.add(
+    underTray, belt, hull, hood, trunk, cabinBase, roof, cowl, rockerL, rockerR,
+    wind, rearGlass, sideGlassL, sideGlassR,
+    grille, grilleBar1, hl1, hl2, hlLensL, hlLensR,
+    tl1, tl2, tlBar,
+    bumperF, bumperFlip, bumperR, bumperRlip,
+    archFL, archFR, archRL, archRR,
+    mirrorL, mirrorR, mirrorLglass, mirrorRglass,
+    beltTrimL, beltTrimR, seamL, seamR
+  );
+
+  // --- wheels: front pair (-Z) then rear pair (+Z); axle along X so they roll on Z.
+  // Front wheels live inside a steer-pivot Group so steer (pivot.rotation.y) and roll
+  // (wheel.rotation.x) compose cleanly. Each wheel is a sub-group: tire + sidewall + hub + spokes. ---
+  const wheelGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.34, 22); wheelGeo.rotateZ(PI / 2);          // tire tread
+  const sidewallGeo = new THREE.TorusGeometry(0.42, 0.1, 8, 22); sidewallGeo.rotateY(PI / 2);          // rounded tire shoulder
+  const hubGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.08, 16); hubGeo.rotateZ(PI / 2);              // alloy rim disc
+  const hubCenterGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.1, 10); hubCenterGeo.rotateZ(PI / 2);   // center cap
+
+  function makeWheel(side) {
+    // side = -1 for left, +1 for right (determines which face the hub/cap shows)
+    const w = new THREE.Mesh(wheelGeo, tireMat);
+    const hubFace = side * 0.16;
+    const sidewall = new THREE.Mesh(sidewallGeo, tireMat); sidewall.position.x = hubFace * 0.6;
+    const hub = new THREE.Mesh(hubGeo, hubMat); hub.position.x = hubFace;
+    const cap = new THREE.Mesh(hubCenterGeo, chrome); cap.position.x = hubFace + 0.05;
+    // alloy spokes radiating from the hub center
+    for (let s = 0; s < 5; s++) {
+      const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.42, 0.04), hubMat);
+      spoke.position.x = hubFace;
+      spoke.rotation.x = (s / 5) * PI * 2;
+      hub.add(spoke);
+    }
+    w.add(sidewall, hub, cap);
+    return w;
+  }
+
   const wheels = [], steerPivots = [];
   let wi = 0;
-  for (const [x, z] of [[-1.06, -1.4], [1.06, -1.4], [-1.06, 1.45], [1.06, 1.45]]) {
-    const w = new THREE.Mesh(wheelGeo, tireMat);
+  for (const [x, z] of [[-1.04, -1.4], [1.04, -1.4], [-1.04, 1.45], [1.04, 1.45]]) {
+    const side = x < 0 ? -1 : 1;
+    const w = makeWheel(side);
     if (wi < 2) {
       const pivot = new THREE.Group(); pivot.position.set(x, 0.5, z);
       pivot.add(w); g.add(pivot); steerPivots.push(pivot);   // w sits at pivot origin
@@ -234,6 +503,7 @@ function buildCarMesh(bodyColor) {
     }
     wheels.push(w); wi++;
   }
+
   g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   return { group: g, wheels, steerPivots };
 }
@@ -323,6 +593,7 @@ function ensureInit() {
   for (let gx = -2; gx <= 2; gx++) {
     for (let gz = -2; gz <= 2; gz++) {
       if (gx === 0 && gz === 0) continue;           // spawn plaza, kept open
+      if (gx === 0 && (gz === -1 || gz === -2)) continue;  // open corridor to the bank (gta heist)
       if (rng() < 0.18) continue;                   // occasional empty lot
       const cx = gx * CELL, cz = gz * CELL;
       const { mesh, w, d } = buildBuilding(rng);
@@ -414,21 +685,41 @@ function insideBuilding(x, z, pad) {
   }
   return null;
 }
-// push an XZ point out of any building it overlaps, along the shallowest axis
+// Push an XZ point out of every building AABB it overlaps, along the shallowest
+// axis. Iterated to convergence: resolving one box can shove the point into a
+// neighbour, and the old single pass left it stuck inside — that's what let you
+// squeeze through wall seams and inside corners. We re-run until nothing overlaps.
 function resolveCollision(pos, pad) {
-  for (const a of aabbs) {
-    if (pos.x > a.minX - pad && pos.x < a.maxX + pad && pos.z > a.minZ - pad && pos.z < a.maxZ + pad) {
-      const dl = pos.x - (a.minX - pad), dr = (a.maxX + pad) - pos.x;
-      const db = pos.z - (a.minZ - pad), df = (a.maxZ + pad) - pos.z;
-      const m = Math.min(dl, dr, db, df);
-      if (m === dl) pos.x = a.minX - pad;
-      else if (m === dr) pos.x = a.maxX + pad;
-      else if (m === db) pos.z = a.minZ - pad;
-      else pos.z = a.maxZ + pad;
+  for (let iter = 0; iter < 4; iter++) {
+    let hit = false;
+    for (const a of aabbs) {
+      if (pos.x > a.minX - pad && pos.x < a.maxX + pad && pos.z > a.minZ - pad && pos.z < a.maxZ + pad) {
+        const dl = pos.x - (a.minX - pad), dr = (a.maxX + pad) - pos.x;
+        const db = pos.z - (a.minZ - pad), df = (a.maxZ + pad) - pos.z;
+        const m = Math.min(dl, dr, db, df);
+        if (m === dl) pos.x = a.minX - pad;
+        else if (m === dr) pos.x = a.maxX + pad;
+        else if (m === db) pos.z = a.minZ - pad;
+        else pos.z = a.maxZ + pad;
+        hit = true;
+      }
     }
+    if (!hit) break;
   }
   pos.x = Math.max(-BOUND, Math.min(BOUND, pos.x));
   pos.z = Math.max(-BOUND, Math.min(BOUND, pos.z));
+}
+// Swept horizontal move: advance in steps no larger than ~half the collider
+// radius, resolving after each, so a fast move (or a laggy big-dt frame) can't
+// tunnel through a wall and corners resolve cleanly instead of letting you slip by.
+function moveAndCollide(pos, dx, dz, pad) {
+  const dist = Math.hypot(dx, dz);
+  const steps = Math.max(1, Math.ceil(dist / Math.max(0.05, pad * 0.5)));
+  const sx = dx / steps, sz = dz / steps;
+  for (let i = 0; i < steps; i++) {
+    pos.x += sx; pos.z += sz;
+    resolveCollision(pos, pad);
+  }
 }
 
 // ============================================================
@@ -446,8 +737,9 @@ function onKeyDown(e) {
   }
   if (!OF.active) return;
   e.stopImmediatePropagation();
-  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].includes(e.code)) e.preventDefault();
   keys.add(e.code);
+  justPressed.add(e.code);   // captured at keydown so fast taps aren't lost by a per-frame poll
   if (e.code === 'KeyE') {                                // enter / exit a car
     if (mode === 'drive') exitVehicle();
     else { const v = nearestVehicle(3.8); if (v) enterVehicle(v); }
@@ -493,6 +785,7 @@ function reload() {
 }
 
 function fire() {
+  if (OF.combatOwned) return;   // an optional systems layer (gta/onfoot-bridge.js) owns weapons + firing
   if (mode !== 'foot') return;
   if (player.fireT > 0 || player.reloadT > 0) return;
   if (player.ammo <= 0) { reload(); return; }
@@ -525,7 +818,10 @@ function fire() {
   tracer.material.opacity = 0.9; tracerT = 0.06;
   muzzleFlash.position.copy(muzzleWorld); muzzleFlash.material.opacity = 1; flashT = 0.05;
 
-  if (best) killPed(best);
+  // let an optional systems layer (police) claim the shot first if a cop is
+  // closer than the pedestrian, so a single bullet hits exactly one target.
+  const copClaimed = OF.onFire ? OF.onFire(best ? bestT : MAX_RANGE) === true : false;
+  if (best && !copClaimed) killPed(best);
   startleNearby();
   updateHud();
 }
@@ -535,6 +831,7 @@ function killPed(p) {
   p.fall = (Math.random() < 0.5 ? 1 : -1);             // tip direction
   for (const m of p.mats) { m.transparent = true; }
   kills++;
+  if (OF.onKill) OF.onKill(p);
   updateHud();
 }
 
@@ -542,10 +839,67 @@ function killPed(p) {
 // ENTER / EXIT — swap the whole view to the on-foot canvas
 // ============================================================
 let saved = null;
+// ---- loading screen --------------------------------------------------------
+// Building the scene + compiling shaders + uploading the procedural textures is
+// heavy and used to stutter the first second of play. We show this overlay, do
+// all that work plus a GPU warm-up behind it, and only start the loop once it's
+// ready — so gameplay begins smooth.
+let loadingEl = null, entering = false;
+function showLoading() {
+  const frame = document.getElementById('frame') || document.body;
+  if (!loadingEl) {
+    loadingEl = document.createElement('div');
+    loadingEl.id = 'foot-loading';
+    loadingEl.style.cssText = 'position:absolute;inset:0;z-index:30;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:radial-gradient(circle at 50% 38%,#14233a,#070f1c 78%);color:#eaf2ff;font-family:system-ui,Segoe UI,Roboto,sans-serif;transition:opacity .4s ease';
+    loadingEl.innerHTML =
+      '<div style="font-size:12px;letter-spacing:4px;color:#7fa8d8">WEEKEND ROAD TRIP</div>' +
+      '<div style="font-size:clamp(26px,5vw,46px);font-weight:800;letter-spacing:2px">LOADING…</div>' +
+      '<div style="width:min(60%,260px);height:6px;border-radius:3px;background:#1b2a42;overflow:hidden"><i id="foot-loading-bar" style="display:block;height:100%;width:15%;background:linear-gradient(90deg,#4f8cff,#7ee2b8);transition:width .35s ease"></i></div>' +
+      '<div id="foot-loading-label" style="font-size:13px;color:#9fb6d6">Preparing the city…</div>';
+    frame.appendChild(loadingEl);
+  }
+  loadingEl.style.display = 'flex';
+  loadingEl.style.opacity = '1';
+}
+function setLoading(label, pct) {
+  if (!loadingEl) return;
+  if (label) { const l = loadingEl.querySelector('#foot-loading-label'); if (l) l.textContent = label; }
+  if (pct != null) { const b = loadingEl.querySelector('#foot-loading-bar'); if (b) b.style.width = pct + '%'; }
+}
+function hideLoading() {
+  if (!loadingEl) return;
+  const el = loadingEl;
+  el.style.opacity = '0';
+  setTimeout(() => { el.style.display = 'none'; }, 430);
+}
+
 function enter() {
-  if (OF.active) return;
+  if (OF.active || entering) return;
+  entering = true;
+  showLoading();
+  setLoading('Preparing the city…', 15);
+  // let the overlay paint, then load character art (async) BEFORE the town build
+  // so people spawn as rigged models; fully optional, falls back to procedural.
+  requestAnimationFrame(() => requestAnimationFrame(() => preloadActorArt(enterBuild)));
+}
+
+// Dynamic-import the optional rigged-character module + load its model, then
+// continue to the build. If anything fails, buildPerson uses procedural people.
+function preloadActorArt(next) {
+  if (OF._actorTried) { next(); return; }
+  OF._actorTried = true;
+  setLoading('Loading characters…', 28);
+  import('./gta/onfoot-actors.js')
+    .then((mod) => { OF._actorMod = mod; return mod.preloadActors(); })
+    .then((ok) => { if (ok && OF._actorMod) OF._makeActor = OF._actorMod.makeActor; })
+    .catch((e) => { console.warn('[ONFOOT] character art unavailable; procedural people', e); })
+    .finally(() => { try { next(); } catch (e) { console.error('[ONFOOT] build failed', e); entering = false; hideLoading(); } });
+}
+
+function enterBuild() {
   try {
-    if (!ensureInit()) return;
+    setLoading('Building the town…', 40);
+    if (!ensureInit()) { entering = false; hideLoading(); return; }
     localStorage.setItem('wrt.onfoot.unlocked', 'true');
     OF.active = true;
     // remember and hide the driving view
@@ -578,16 +932,43 @@ function enter() {
     showToast('You step out of the convertible. The town is yours.<br><b>Click</b> to look around &middot; <b>WASD</b> walk &middot; <b>Click</b> shoot &middot; <b>E</b> to steal any car');
     updateHud();
 
-    lastT = 0;
-    rafId = requestAnimationFrame(loop);
+    setLoading('Spinning up the city systems…', 60);
+    if (OF.onEnter) OF.onEnter();    // boot the optional systems layer before the first frame
+    // wait for the layer's async pipeline (textures/lighting/post-FX) to settle,
+    // then warm the GPU, so the first real frames don't stutter.
+    waitForLayerThenWarm(0);
   } catch (e) {
     console.error('[ONFOOT] enter failed; staying in the base game', e);
-    exit();
+    entering = false; hideLoading(); exit();
   }
 }
 
+// Hold the loading screen until the optional systems layer signals its async
+// setup is done (OF.layerReady), then precompile shaders + prime a few frames so
+// play starts smooth. Falls through after ~4s if nothing ever signals.
+function waitForLayerThenWarm(tries) {
+  if (OF.layerReady === false && tries < 240) {
+    requestAnimationFrame(() => waitForLayerThenWarm(tries + 1));
+    return;
+  }
+  setLoading('Warming up…', 85);
+  try { resizeIfNeeded(); } catch (e) {}
+  try { renderer.compile(scene, camera); } catch (e) {}     // precompile every material's shader + upload textures
+  for (let i = 0; i < 3; i++) {                             // prime the post-FX composer (AA/AO/bloom) too
+    try { if (OF.renderHook) OF.renderHook(0.016); else renderer.render(scene, camera); } catch (e) {}
+  }
+  setLoading('Ready', 100);
+  hideLoading();
+  entering = false;
+  lastT = 0;
+  rafId = requestAnimationFrame(loop);
+}
+
 function exit() {
+  if (OF.active && OF.onExit) OF.onExit();   // tear down the optional systems layer
   OF.active = false;
+  entering = false;
+  hideLoading();
   if (rafId) cancelAnimationFrame(rafId); rafId = 0;
   if (document.pointerLockElement === canvas) document.exitPointerLock();
   if (canvas) canvas.classList.add('hidden');
@@ -616,7 +997,8 @@ function loop(time) {
   try {
     update(dt);
     postFrameUi(dt);
-    renderer.render(scene, camera);
+    if (OF.renderHook) OF.renderHook(dt);   // optional post-processing pipeline (gta realism layer)
+    else renderer.render(scene, camera);
   } catch (e) {
     console.error('[ONFOOT] frame failed; leaving on-foot mode', e);
     exit(); return;
@@ -635,6 +1017,8 @@ function update(dt) {
   // visual timers (tracer / muzzle flash)
   if (tracerT > 0) { tracerT -= dt; if (tracerT <= 0) tracer.material.opacity = 0; }
   if (flashT > 0) { flashT -= dt; if (flashT <= 0) muzzleFlash.material.opacity = 0; }
+
+  if (OF.onTick) OF.onTick(dt);   // optional systems layer (gta/onfoot-bridge.js)
 }
 
 function updateOnFoot(dt) {
@@ -651,7 +1035,7 @@ function updateOnFoot(dt) {
   if (keys.has('KeyD') || keys.has('ArrowRight')) { mx += _right.x; mz += _right.z; }
   const ml = Math.hypot(mx, mz);
   const moving = ml > 0.001;
-  if (moving) { mx /= ml; mz /= ml; player.pos.x += mx * speed * dt; player.pos.z += mz * speed * dt; }
+  if (moving) { mx /= ml; mz /= ml; moveAndCollide(player.pos, mx * speed * dt, mz * speed * dt, PLAYER_R); }
 
   // gravity / jump / ground
   player.vy -= GRAV * dt;
@@ -665,7 +1049,7 @@ function updateOnFoot(dt) {
   player.facing = lerpAngle(player.facing, targetFacing, 0.25);
   player.mesh.position.copy(player.pos);
   player.mesh.rotation.y = player.facing;
-  animateWalk(player.mesh, moving, dt);
+  animateWalk(player.mesh, moving, dt, speed);
 
   // reload / fire timers
   if (player.reloadT > 0) { player.reloadT -= dt; if (player.reloadT <= 0) { player.ammo = AMMO_MAX; updateHud(); } }
@@ -710,9 +1094,7 @@ function updateDriving(dt) {
   // integrate position along heading; bleed speed on a wall hit
   const fx = Math.sin(v.heading), fz = Math.cos(v.heading);
   const px = v.pos.x, pz = v.pos.z;
-  v.pos.x += fx * v.speed * dt;
-  v.pos.z += fz * v.speed * dt;
-  resolveCollision(v.pos, CAR_RADIUS);
+  moveAndCollide(v.pos, fx * v.speed * dt, fz * v.speed * dt, CAR_RADIUS);
   const moved = Math.hypot(v.pos.x - px, v.pos.z - pz);
   const intended = Math.abs(v.speed) * dt;
   if (intended > 0.05 && moved < intended * 0.5) v.speed *= 0.25;  // crunched into a building
@@ -749,6 +1131,7 @@ function enterVehicle(v) {
   mode = 'drive';
   playerVehicle = v;
   v.occupied = true;
+  if (OF.onJack) OF.onJack(v);
   keys.clear();                         // start the drive scheme from a clean input state
   player.mesh.visible = false;
   if (document.pointerLockElement === canvas) document.exitPointerLock();
@@ -830,9 +1213,14 @@ function startleNearby() {
   }
 }
 
-// cheap procedural walk: swing arms/legs opposite when moving
+// walk animation: drive the rigged model's AnimationMixer when present, else the
+// cheap procedural arm/leg swing.
 function animateWalk(mesh, moving, dt, sp) {
   const u = mesh.userData;
+  if (u.actor) {
+    if (OF._actorMod) OF._actorMod.updateActor(u.actor, dt, { moving, running: (sp || 0) >= 5.0, dead: !!u.dead });
+    return;
+  }
   if (!u.legL) return;
   u.phase = (u.phase || 0) + (moving ? (sp || WALK) * dt * 2.2 : 0);
   const s = moving ? Math.sin(u.phase) * 0.5 : 0;
@@ -888,6 +1276,7 @@ function resize() {
   const w = canvas.clientWidth || 960, h = canvas.clientHeight || 540;
   renderer.setSize(w, h, false);
   camera.aspect = w / h; camera.updateProjectionMatrix();
+  if (OF.onResize) OF.onResize(w, h);   // resize the optional post-processing composer
   lastW = w; lastH = h;
 }
 function resizeIfNeeded() {
@@ -923,6 +1312,27 @@ function watchForWin() {
 // ============================================================
 // BOOT — wire listeners + HUD; build nothing heavy until first enter()
 // ============================================================
+// Additive integration surface for an optional systems layer (gta/onfoot-bridge.js):
+// read-only access to internals + optional hooks the bridge assigns. When no bridge
+// is loaded, OF.onEnter/onTick/onFire/onKill/onJack/onExit are simply never set, so
+// this changes nothing about the base on-foot mode. Placed here (after all module
+// declarations) so direct field refs aren't in a temporal-dead-zone.
+OF.internals = {
+  THREE,
+  get scene() { return scene; },
+  get camera() { return camera; },
+  get renderer() { return renderer; },
+  get canvas() { return canvas; },
+  player, keys, peds, vehicles, aabbs,
+  get yaw() { return yaw; }, set yaw(v) { yaw = v; },
+  get pitch() { return pitch; }, set pitch(v) { pitch = v; },
+  get locked() { return locked; },
+  get mode() { return mode; },
+  get playerVehicle() { return playerVehicle; },
+  bound: BOUND,
+  resolveCollision, insideBuilding, spawnVehicle, nearestVehicle, enterVehicle, exitVehicle, killPed, startleNearby, justPressed,
+};
+
 ensureHud();
 watchForWin();
 // capture-phase so we pre-empt game.js's window listeners while active
@@ -940,4 +1350,16 @@ if (/gta|playtest/i.test(location.hash) || /gta|playtest/i.test(location.search)
   localStorage.setItem('wrt.onfoot.unlocked', 'true');
   // defer a frame so game.js has finished its own boot + initial applyScreen
   requestAnimationFrame(() => { try { enter(); } catch (e) { console.error('[ONFOOT] auto-enter failed', e); } });
+}
+
+// Title-screen entry: a visible "ENTER HEIST MODE" button (index.html #btn-heist)
+// so first-time players can jump into the on-foot heist without finishing the
+// drive or knowing the #gta link. The button carries no data-action, so game.js
+// ignores it and this is the only handler.
+{
+  const heistBtn = document.getElementById('btn-heist');
+  if (heistBtn) heistBtn.addEventListener('click', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    try { enter(); } catch (err) { console.error('[ONFOOT] heist-button enter failed', err); }
+  });
 }

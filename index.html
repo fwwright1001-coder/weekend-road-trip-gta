@@ -41,6 +41,23 @@
         <div class="foot-controls">WASD move · MOUSE look · CLICK shoot · R reload · SPACE jump · SHIFT run · E steal/exit car · P quit</div>
       </div>
 
+      <!-- ============ GTA systems HUD (crime-sandbox layer: gta/onfoot-bridge.js) ============ -->
+      <div id="gta-hud" class="hidden" aria-hidden="true">
+        <canvas id="gta-radar" width="220" height="220"></canvas>
+        <div id="gta-stars" class="gta-stars" aria-label="Wanted level"></div>
+        <div id="gta-money" class="gta-money">$0</div>
+        <div class="gta-weaponbox">
+          <div id="gta-weapon" class="gta-weapon">PISTOL</div>
+          <div id="gta-ammo" class="gta-ammo">—</div>
+        </div>
+        <div class="gta-vitals">
+          <div class="gta-bar gta-health"><i id="gta-health-fill"></i></div>
+          <div class="gta-bar gta-armor"><i id="gta-armor-fill"></i></div>
+        </div>
+        <div id="gta-objective" class="gta-objective hidden"></div>
+        <div id="gta-toast" class="gta-toast hidden"></div>
+      </div>
+
       <!-- ============ HUD overlay (visible during gameplay) ============ -->
       <div id="hud" class="hidden">
         <div class="hud-row top">
@@ -82,6 +99,8 @@
             roadside snacks. Don't run out of gas before you reach the ocean.
           </p>
           <button class="cta" data-action="start">START THE TRIP</button>
+          <!-- jumps straight into the hidden on-foot GTA heist (no data-action: onfoot3d.js wires the click) -->
+          <button class="cta" id="btn-heist" style="margin-top:10px;background:linear-gradient(180deg,#b5432e,#7c2a1c);border-color:#e0653f;color:#fff">🔫 ENTER HEIST MODE</button>
           <div class="menu-actions">
             <button data-action="scores">HIGH SCORES</button>
             <button data-action="achievements">ACHIEVEMENTS</button>
@@ -214,5 +233,7 @@
   <script src="game.js"></script>
   <script type="module" src="render3d.js"></script>
   <script type="module" src="onfoot3d.js"></script>
+  <!-- Crime-sandbox systems layer (wanted/police/economy/missions/radar) bolted onto on-foot mode -->
+  <script type="module" src="gta/onfoot-bridge.js"></script>
 </body>
 </html>
