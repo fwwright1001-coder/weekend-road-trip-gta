@@ -1,35 +1,70 @@
 // ============================================================
 // gta/onfoot-actors.js — rigged, animated character art for the on-foot mode.
 // ------------------------------------------------------------
-// Loads a single CC0 humanoid (RobotExpressive.glb — Idle/Walking/Running/Jump/
-// Death/Punch) once, then clones it per character (SkeletonUtils, so each clone
-// gets its own skeleton + AnimationMixer). onfoot3d's buildPerson() uses this
-// when it's ready and falls back to its procedural box-person if it isn't, so a
-// missing/failed asset can never break the game.
+// Loads a single rigged humanoid (Soldier.glb — Idle/Walk/Run) once, then clones
+// it per character (SkeletonUtils, so each clone gets its own skeleton +
+// AnimationMixer). onfoot3d's buildPerson() uses this when ready and falls back
+// to its procedural box-person if not, so a missing asset can never crash.
 //
-// Contract for the host: makeActor() returns a THREE.Group whose origin is at
-// the FEET, ~1.8 units tall, facing +Z — the same contract as buildPerson — with
-// g.userData.actor = the animation handle. Drive it each frame with
-// updateActor(g.userData.actor, dt, { moving, running, dead }).
+// ARMED actors (the player) also get a procedural GUN/AIM RIG: the gun is parented
+// to the right-hand bone, the right arm/forearm are posed into a weapon-ready
+// stance (with aim-pitch elevation), and each shot kicks a recoil that decays.
+// The bone angles are tunable LIVE via window.ONFOOT_AIM (dial them in-browser).
+//
+// Contract: makeActor() returns a THREE.Group (feet at origin, ~1.8 tall, facing
+// +Z) with userData.actor. Drive it with updateActor(actor, dt, { moving, running,
+// dead, pitch }). Recoil auto-fires off the 'gunfire' crime event.
 // ============================================================
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { GTA } from './core.js';
 
 const MODEL_URL = new URL('../assets/models/Soldier.glb', import.meta.url).href;
 const TARGET_HEIGHT = 1.8;          // normalize the model to ~human height (matches the box-person)
-const FACING = 0;                   // model front is +Z (matches buildPerson). If people face backward in-game, set Math.PI.
-const CLIPS = { idle: 'Idle', walk: 'Walk', run: 'Run' };   // clips this model provides; missing ones are skipped gracefully
+const FACING = 0;                   // model front is +Z (matches buildPerson). If people face backward, set Math.PI.
+const CLIPS = { idle: 'Idle', walk: 'Walk', run: 'Run' };   // clips this model has; missing ones are skipped
+
+// Procedural aim/gun rig — LIVE-EDITABLE in the console via window.ONFOOT_AIM
+// (e.g. `ONFOOT_AIM.armX = -1.0`). Angles are radians; the defaults are a best
+// guess for the Mixamo rig — dial them in a browser until the gun points right.
+const AIM = {
+  enabled: true,
+  gunScale: 1.0,               // scale the gun mesh if it loads too big/small in the hand
+  gunPos: [0.02, 0.0, 0.06],   // gun offset inside the right-hand bone (bone-local)
+  gunRot: [Math.PI / 2, 0, 0], // gun orientation in the hand (barrel forward)
+  muzzleZ: 0.40,               // barrel tip distance from the gun origin
+  armX: -1.15, armY: 0.15, armZ: 0.10,   // right-arm "weapon ready" pose
+  foreX: -0.55, foreY: 0.0, foreZ: 0.0,  // right-forearm bend
+  pitchArm: 0.55,              // how much look-pitch raises/lowers the aim
+  recoilKickPos: 0.06,         // gun jerks back this far on a shot (local Z)
+  recoilKickArm: 0.28,         // arm kicks up this much on a shot
+  recoilDecay: 7,              // recoil falls off at this rate (per second)
+  recoilAmount: 1.0,           // strength of each shot's kick (0..1)
+  dump() { const o = {}; for (const k in AIM) if (typeof AIM[k] !== 'function') o[k] = AIM[k]; return o; },
+};
+if (typeof window !== 'undefined') window.ONFOOT_AIM = AIM;
 
 let _src = null;        // { scene, animations }
 let _scale = 1;         // normalization scale
 let _footY = 0;         // y offset so feet rest at 0 after scaling
 let _ready = false, _failed = false, _loading = null;
+const _armed = [];      // armed actors (the player) — recoil kicked on player gunfire
+let _busWired = false;
+
+function _wireBus() {
+  if (_busWired) return; _busWired = true;
+  try {
+    // combat.js emits a 'gunfire' crime on each player shot — kick the gun recoil
+    GTA.bus.on('crime', (e) => {
+      if (e && e.kind === 'gunfire') for (const a of _armed) a.recoil = Math.min(1, a.recoil + AIM.recoilAmount);
+    });
+  } catch (e) { /* no bus yet -> recoil simply won't kick */ }
+}
 
 export function actorsReady() { return _ready; }
 
-// Load + normalize the model once. Resolves true on success, false on failure
-// (never rejects — the caller just falls back to procedural people).
+// Load + normalize the model once. Resolves true on success, false on failure.
 export function preloadActors() {
   if (_ready || _failed) return Promise.resolve(_ready);
   if (_loading) return _loading;
@@ -42,7 +77,7 @@ export function preloadActors() {
         const box = new THREE.Box3().setFromObject(gltf.scene);
         const h = Math.max(0.001, box.max.y - box.min.y);
         _scale = TARGET_HEIGHT / h;
-        _footY = -box.min.y * _scale;     // lift so the lowest point sits at y=0
+        _footY = -box.min.y * _scale;
         _ready = true;
         resolve(true);
       } catch (e) { console.warn('[actors] normalize failed; procedural fallback', e); _failed = true; resolve(false); }
@@ -53,7 +88,7 @@ export function preloadActors() {
 
 // Build one character. Returns a Group (feet at origin, ~1.8 tall, facing +Z)
 // with userData.actor, or null if the model isn't ready (caller falls back).
-//   opts: { colorize?: hex (lerp materials toward it), armed?: bool, scaleVar?: number }
+//   opts: { colorize?: hex, armed?: bool, scaleVar?: number }
 export function makeActor(opts = {}) {
   if (!_ready || !_src) return null;
   let inner;
@@ -67,7 +102,7 @@ export function makeActor(opts = {}) {
   inner.traverse((o) => {
     if (!o.isMesh) return;
     o.castShadow = true; o.receiveShadow = true;
-    o.frustumCulled = false;                       // skinned bounds can mis-cull; keep visible
+    o.frustumCulled = false;
     if (o.material) {
       o.material = Array.isArray(o.material) ? o.material.map((m) => m.clone()) : o.material.clone();
       if (opts.colorize != null) {
@@ -87,39 +122,75 @@ export function makeActor(opts = {}) {
     const clip = THREE.AnimationClip.findByName(_src.animations, CLIPS[key]);
     if (clip) actions[key] = mixer.clipAction(clip);
   }
-  const actor = { mixer, actions, current: null, dead: false };
+  const actor = { mixer, actions, current: null, dead: false, armed: false, recoil: 0, bones: null, gun: null, gunRestZ: 0 };
   g.userData.actor = actor;
   if (actions.idle) { actions.idle.play(); actor.current = 'idle'; }
 
   if (opts.armed) {
-    // approximate muzzle (right hand, forward) + a tiny gun so the player reads as armed
-    const muzzle = new THREE.Object3D(); muzzle.position.set(0.24, 1.2, 0.55); g.add(muzzle);
-    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 0.5),
+    _wireBus();
+    // find the bones the aim rig poses
+    const bones = {};
+    inner.traverse((o) => {
+      if (!o.isBone) return;
+      switch (o.name) {
+        case 'mixamorigRightHand': bones.hand = o; break;
+        case 'mixamorigRightForeArm': bones.foreArm = o; break;
+        case 'mixamorigRightArm': bones.arm = o; break;
+        case 'mixamorigSpine2': bones.spine = o; break;
+      }
+    });
+    const gun = new THREE.Mesh(
+      new THREE.BoxGeometry(0.06, 0.12, 0.42),
       new THREE.MeshStandardMaterial({ color: 0x23262b, metalness: 0.6, roughness: 0.4 }));
-    gun.position.copy(muzzle.position); gun.castShadow = true; g.add(gun);
+    gun.castShadow = true;
+    gun.scale.setScalar(AIM.gunScale);
+    const muzzle = new THREE.Object3D(); gun.add(muzzle); muzzle.position.set(0, 0, AIM.muzzleZ);
+    if (bones.hand) {
+      bones.hand.add(gun);                                   // gun follows the hand through animation
+      gun.position.set(AIM.gunPos[0], AIM.gunPos[1], AIM.gunPos[2]);
+      gun.rotation.set(AIM.gunRot[0], AIM.gunRot[1], AIM.gunRot[2]);
+      actor.bones = bones; actor.gun = gun; actor.gunRestZ = gun.position.z;
+      _armed.push(actor);
+    } else {
+      gun.position.set(0.24, 1.2, 0.55); g.add(gun);         // no skeleton -> bolt to the group (fallback)
+    }
+    actor.armed = true;
     g.userData.muzzle = muzzle; g.userData.gun = gun;
   }
   return g;
 }
 
-// Crossfade to the clip the movement state implies, then advance the mixer.
+// Crossfade to the clip the movement state implies, advance the mixer, then apply
+// the procedural aim pose (armed only) AFTER the mixer so it overrides the arm.
 export function updateActor(actor, dt, st) {
   if (!actor || !actor.mixer) return;
   if (!actor.dead) {
     let want = 'idle';
-    if (st && st.dead && actor.actions.death) want = 'death';   // only if the model has a death clip
+    if (st && st.dead && actor.actions.death) want = 'death';
     else if (st && st.running) want = 'run';
     else if (st && st.moving) want = 'walk';
     if (want === 'death') actor.dead = true;
     _setState(actor, want);
   }
   actor.mixer.update(dt || 0);
+  if (actor.armed) {
+    if (actor.recoil > 0) actor.recoil = Math.max(0, actor.recoil - (dt || 0) * AIM.recoilDecay);
+    if (actor.bones && AIM.enabled) _applyAim(actor, (st && st.pitch) || 0);
+  }
+}
+
+// procedural weapon-ready pose + aim-pitch + recoil kick (overrides the right arm)
+function _applyAim(actor, pitch) {
+  const b = actor.bones, r = actor.recoil;
+  if (b.arm) b.arm.rotation.set(AIM.armX - pitch * AIM.pitchArm - r * AIM.recoilKickArm, AIM.armY, AIM.armZ);
+  if (b.foreArm) b.foreArm.rotation.set(AIM.foreX, AIM.foreY, AIM.foreZ);
+  if (actor.gun) actor.gun.position.z = actor.gunRestZ - r * AIM.recoilKickPos;
 }
 
 function _setState(actor, name) {
   if (actor.current === name) return;
   const next = actor.actions[name];
-  if (!next) return;                                  // missing clip -> keep current
+  if (!next) return;
   const prev = actor.current && actor.actions[actor.current];
   if (name === 'death') { next.setLoop(THREE.LoopOnce, 1); next.clampWhenFinished = true; }
   next.reset().fadeIn(0.2).play();
@@ -127,4 +198,9 @@ function _setState(actor, name) {
   actor.current = name;
 }
 
-export default { preloadActors, actorsReady, makeActor, updateActor };
+// manual recoil kick (also auto-fired off the 'gunfire' crime event)
+export function kickRecoil(actor, amount) {
+  if (actor && actor.armed) actor.recoil = Math.min(1, actor.recoil + (amount == null ? 1 : amount));
+}
+
+export default { preloadActors, actorsReady, makeActor, updateActor, kickRecoil };

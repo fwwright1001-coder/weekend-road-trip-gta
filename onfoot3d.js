@@ -1065,7 +1065,14 @@ function updateOnFoot(dt) {
   if (keys.has('KeyD') || keys.has('ArrowRight')) { mx += _right.x; mz += _right.z; }
   const ml = Math.hypot(mx, mz);
   const moving = ml > 0.001;
-  if (moving) { mx /= ml; mz /= ml; moveAndCollide(player.pos, mx * speed * dt, mz * speed * dt, PLAYER_R); }
+  // smooth acceleration/deceleration toward the desired velocity (momentum -> feel)
+  if (moving) { mx /= ml; mz /= ml; }
+  const _tvx = (moving ? mx : 0) * speed, _tvz = (moving ? mz : 0) * speed;   // target velocity
+  const _ak = 1 - Math.exp(-dt / 0.11);                                       // accel/decel time-constant (s)
+  player._vx = (player._vx || 0) + (_tvx - (player._vx || 0)) * _ak;
+  player._vz = (player._vz || 0) + (_tvz - (player._vz || 0)) * _ak;
+  const _vmag = Math.hypot(player._vx, player._vz);
+  if (_vmag > 0.02) moveAndCollide(player.pos, player._vx * dt, player._vz * dt, PLAYER_R);
 
   // gravity / jump / ground
   player.vy -= GRAV * dt;
@@ -1079,7 +1086,7 @@ function updateOnFoot(dt) {
   player.facing = lerpAngle(player.facing, targetFacing, 0.35);
   player.mesh.position.copy(player.pos);
   player.mesh.rotation.y = player.facing;
-  animateWalk(player.mesh, moving, dt, speed);
+  animateWalk(player.mesh, _vmag > 0.3, dt, _vmag);   // animation driven by ACTUAL speed (so momentum reads)
 
   // reload / fire timers
   if (player.reloadT > 0) { player.reloadT -= dt; if (player.reloadT <= 0) { player.ammo = AMMO_MAX; updateHud(); } }
@@ -1266,7 +1273,7 @@ function startleNearby() {
 function animateWalk(mesh, moving, dt, sp) {
   const u = mesh.userData;
   if (u.actor) {
-    if (OF._actorMod) OF._actorMod.updateActor(u.actor, dt, { moving, running: (sp || 0) >= 5.0, dead: !!u.dead });
+    if (OF._actorMod) OF._actorMod.updateActor(u.actor, dt, { moving, running: (sp || 0) >= 5.0, dead: !!u.dead, pitch });
     return;
   }
   if (!u.legL) return;
