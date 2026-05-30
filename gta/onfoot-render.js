@@ -40,12 +40,13 @@
 export async function installRealism(THREE, renderer, scene, camera, canvas, opts = {}) {
   // ---- tunables (overridable via opts) -------------------------------------
   const EXPOSURE      = opts.exposure        ?? 1.0;
-  const MAX_PIXEL_RATIO = opts.maxPixelRatio ?? 1.5;
-  // Bloom kept tight: only genuinely emissive things (signs/lamps/lit windows)
-  // should glow. A low threshold + high strength is what washes the scene out.
-  const BLOOM_STRENGTH  = opts.bloomStrength ?? 0.24;
-  const BLOOM_RADIUS    = opts.bloomRadius   ?? 0.4;
-  const BLOOM_THRESHOLD = opts.bloomThreshold ?? 0.9;
+  const MAX_PIXEL_RATIO = opts.maxPixelRatio ?? 2;       // allow up to 2x for crispness (governor pulls it down under load)
+  const SUPERSAMPLE   = opts.superSample     ?? 1.5;     // render above native density so the image isn't soft (capped by MAX)
+  // Bloom: emissive things (signs, lamps, pickups) should clearly glow without
+  // washing the frame — moderate strength + a not-too-low threshold.
+  const BLOOM_STRENGTH  = opts.bloomStrength ?? 0.40;
+  const BLOOM_RADIUS    = opts.bloomRadius   ?? 0.45;
+  const BLOOM_THRESHOLD = opts.bloomThreshold ?? 0.82;
   // LIGHT REBALANCE — the host's lights (sun + hemisphere) were tuned for the
   // plain pipeline (no tone mapping, no IBL). Once we add ACES + a RoomEnvironment
   // image-based light, the scene is double-lit (too bright in lit spots, crushed
@@ -104,7 +105,7 @@ export async function installRealism(THREE, renderer, scene, camera, canvas, opt
 
   function clampPR() {
     const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-    return Math.min(dpr, MAX_PIXEL_RATIO);
+    return Math.min(dpr * SUPERSAMPLE, MAX_PIXEL_RATIO);   // supersample for sharpness, capped
   }
 
   function currentSize() {

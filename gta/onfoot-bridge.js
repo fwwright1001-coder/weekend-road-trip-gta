@@ -376,7 +376,7 @@ function onEnter() {
     active = true;
     document.getElementById('gta-hud')?.classList.remove('hidden');
     document.body.classList.add('gta-active');
-    GTA.bus.emit('toast', { html: 'Heist time. Get to the <b>bank</b> (radar marker), grab the <b>goop</b> from the vault, then <b>escape in a car</b>. Cops will come — fight or flee.<br>You’re carrying a <b>pistol</b> + <b>AK-47</b> — <b>Tab</b> or <b>1-5</b> to switch, <b>R</b> to reload.', ms: 8000 });
+    GTA.bus.emit('toast', { html: 'Heist time. Get to the <b>bank</b> (radar marker), grab the <b>goop</b> from the vault, then <b>escape in a car</b>. Cops will come — fight or flee.<br>You’re carrying a <b>pistol</b> + <b>AK-47</b> — <b>Tab</b>/<b>1-5</b> switch, <b>R</b> reload. <b>Click</b> to look (or <b>Q/E</b> to turn).', ms: 8000 });
   } catch (e) { console.error('[GTA bridge] onEnter failed; base on-foot mode unaffected', e); }
 }
 

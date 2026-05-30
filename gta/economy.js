@@ -68,38 +68,41 @@ const mat = {};   // material cache (per kind)
 
 function buildCaches(THREE) {
   // geometries -------------------------------------------------------------
-  // cash: a flattened spinning "coin/billfold" disc + a thin band
-  geo.cashDisc = new THREE.CylinderGeometry(0.42, 0.42, 0.12, 14);
+  // cash: a flattened spinning "coin/billfold" disc + a thin band (rounder rings)
+  geo.cashDisc = new THREE.CylinderGeometry(0.42, 0.42, 0.12, 32);
   geo.cashBand = new THREE.BoxGeometry(0.86, 0.16, 0.04);
   // health: a plus/cross made of two boxes on a small base
   geo.crossV   = new THREE.BoxGeometry(0.18, 0.62, 0.18);
   geo.crossH   = new THREE.BoxGeometry(0.62, 0.18, 0.18);
-  geo.podium   = new THREE.CylinderGeometry(0.34, 0.4, 0.14, 12);
-  // armor: a low-poly shield (icosahedron flattened) + rim
+  geo.podium   = new THREE.CylinderGeometry(0.34, 0.4, 0.14, 28);
+  // armor: a faceted shield (icosahedron) + rim
   geo.shield   = new THREE.IcosahedronGeometry(0.42, 0);
-  geo.shieldRim = new THREE.CylinderGeometry(0.46, 0.46, 0.1, 12);
+  geo.shieldRim = new THREE.CylinderGeometry(0.46, 0.46, 0.1, 28);
   // ammo: a stubby box "magazine" + a small cone tip
   geo.ammoBody = new THREE.BoxGeometry(0.42, 0.5, 0.3);
-  geo.ammoTip  = new THREE.ConeGeometry(0.16, 0.22, 8);
+  geo.ammoTip  = new THREE.ConeGeometry(0.16, 0.22, 16);
   // shared glow base ring under every pickup (helps readability)
-  geo.glowRing = new THREE.CylinderGeometry(0.5, 0.5, 0.04, 16);
+  geo.glowRing = new THREE.CylinderGeometry(0.5, 0.5, 0.04, 32);
 
   // materials --------------------------------------------------------------
+  // glossy + strongly emissive so pickups read as glowing "energy" (the bloom
+  // pass makes the emissive bloom). Premium metal/roughness for a AAA sheen.
   for (const kind of Object.keys(KIND_COLOR)) {
     const col = KIND_COLOR[kind];
     mat[kind] = new THREE.MeshStandardMaterial({
       color: col,
       emissive: col,
-      emissiveIntensity: 0.35,
-      roughness: 0.5,
-      metalness: kind === 'cash' ? 0.4 : 0.1,
+      emissiveIntensity: 1.1,
+      roughness: 0.28,
+      metalness: 0.6,
+      envMapIntensity: 0.9,
       transparent: true,
       opacity: 1,
     });
   }
   // accents reused across kinds
-  mat.dark  = new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.7, transparent: true, opacity: 1 });
-  mat.light = new THREE.MeshStandardMaterial({ color: 0xf4f6f8, emissive: 0xffffff, emissiveIntensity: 0.4, roughness: 0.5, transparent: true, opacity: 1 });
+  mat.dark  = new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.45, metalness: 0.5, transparent: true, opacity: 1 });
+  mat.light = new THREE.MeshStandardMaterial({ color: 0xf4f6f8, emissive: 0xffffff, emissiveIntensity: 1.0, roughness: 0.3, transparent: true, opacity: 1 });
 }
 
 // Build the visual group for a given kind. Each pool slot gets ONE group whose
