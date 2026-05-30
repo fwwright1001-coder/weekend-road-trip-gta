@@ -58,6 +58,23 @@ const CAR_TURN = 2.3;        // steering rate (rad/s) at full authority
 const CAR_RADIUS = 1.9;      // collision pad vs buildings
 const CAR_CAM_DIST = 9.5;    // chase-cam distance behind the car
 const CAR_CAM_HEIGHT = 4.6;  // chase-cam height
+
+// ---- camera feel (live-tunable in the console via window.ONFOOT_CAM) --------
+// Damped follow + speed-based FOV are most of what reads as "smooth". Tunables
+// are time-constants in seconds (smaller = snappier); edit ONFOOT_CAM.* live.
+const CAM = {
+  followTau: 0.09,   // on-foot position smoothing (s)
+  driveTau: 0.16,    // driving chase smoothing (s)
+  fovBase: 62,       // base vertical FOV
+  fovDrive: 78,      // FOV at top car speed (sells velocity)
+  fovTau: 0.30,      // FOV easing (s)
+};
+let _camInit = false;                     // seed the smoothed position on first frame / after mode change
+const _camPos = new THREE.Vector3();      // smoothed camera position (on-foot)
+let _curFov = CAM.fovBase;                // smoothed FOV
+if (typeof window !== 'undefined') window.ONFOOT_CAM = CAM;
+// frame-rate-independent smoothing factor for a given time-constant
+function camDamp(tau, dt) { return 1 - Math.exp(-dt / Math.max(0.0001, tau)); }
 const RUN_OVER_SPEED = 5;    // min speed to knock down a ped you drive into
 
 // ---- public handle ---------------------------------------------------------
@@ -922,7 +939,7 @@ function enterBuild() {
     if (hudEl) hudEl.classList.remove('hidden');
 
     // reset to on-foot at the plaza next to the car (clear any prior drive state)
-    mode = 'foot'; playerVehicle = null;
+    mode = 'foot'; playerVehicle = null; _camInit = false;
     if (player.mesh) player.mesh.visible = true;
     for (const v of vehicles) { v.occupied = false; v.speed = 0; v.mesh.rotation.z = 0; }
     player.pos.set(2.4, 0, 6); player.vy = 0; player.grounded = true;
@@ -1055,13 +1072,26 @@ function updateOnFoot(dt) {
   if (player.reloadT > 0) { player.reloadT -= dt; if (player.reloadT <= 0) { player.ammo = AMMO_MAX; updateHud(); } }
   if (player.fireT > 0) player.fireT -= dt;
 
-  // --- camera: third-person orbit behind the player ---
-  const cz = Math.cos(pitch);
-  _dir.set(Math.sin(yaw) * cz, Math.sin(pitch), Math.cos(yaw) * cz); // look direction
+  // --- camera: damped third-person orbit behind the player ---
+  // Look direction stays LIVE off the mouse (aim feels crisp); only the camera's
+  // position eases toward its target, which is what reads as "smooth".
+  const cpz = Math.cos(pitch);
+  _dir.set(Math.sin(yaw) * cpz, Math.sin(pitch), Math.cos(yaw) * cpz);
   const head = _v.copy(player.pos).setY(EYE);
-  camera.position.copy(head).addScaledVector(_dir, -CAM_DIST);       // behind the head
-  camera.position.y += 0.4 + recoil * 2;
-  if (camera.position.y < 0.6) camera.position.y = 0.6;
+  // pull the camera in if its orbit point would sit inside a building (ease off walls, don't clip through)
+  let camDist = CAM_DIST;
+  for (let s = 0; s < 6; s++) {
+    if (!insideBuilding(head.x - _dir.x * camDist, head.z - _dir.z * camDist, 0.4)) break;
+    camDist -= 0.8; if (camDist < 1.2) { camDist = 1.2; break; }
+  }
+  const desiredCam = _v2.copy(head).addScaledVector(_dir, -camDist);
+  desiredCam.y += 0.4 + recoil * 2;
+  if (desiredCam.y < 0.6) desiredCam.y = 0.6;
+  if (!_camInit) { _camPos.copy(desiredCam); _camInit = true; }        // seed on first frame / after mode change (no swoop)
+  _camPos.lerp(desiredCam, camDamp(CAM.followTau, dt));
+  camera.position.copy(_camPos);
+  _curFov += (CAM.fovBase - _curFov) * camDamp(CAM.fovTau, dt);        // ease FOV back to base on foot
+  if (Math.abs(camera.fov - _curFov) > 0.02) { camera.fov = _curFov; camera.updateProjectionMatrix(); }
   camera.lookAt(head.x + _dir.x, head.y + _dir.y + recoil, head.z + _dir.z);
   recoil = Math.max(0, recoil - dt * 0.6);
 }
@@ -1114,11 +1144,15 @@ function updateDriving(dt) {
   for (let i = 0; i < v.wheels.length; i++) v.wheels[i].rotation.x -= v.speed * dt * 0.6;  // roll
   for (const sp of v.steerPivots) sp.rotation.y = steer * 0.4;                              // front-wheel steer
 
-  // chase camera: smoothly trail behind the car along its heading
+  // chase camera: smoothly trail behind the car; FOV widens with speed for a sense of velocity
   const target = _v.copy(v.pos); target.y += 1.3;
   const desired = _v2.set(v.pos.x - fx * CAR_CAM_DIST, CAR_CAM_HEIGHT, v.pos.z - fz * CAR_CAM_DIST);
-  camera.position.lerp(desired, 1 - Math.pow(0.0015, dt));   // frame-rate-independent smoothing
+  camera.position.lerp(desired, camDamp(CAM.driveTau, dt));
   if (camera.position.y < 1.2) camera.position.y = 1.2;
+  const speedFrac = Math.min(1, Math.abs(v.speed) / CAR_MAX_SPEED);
+  const wantFov = CAM.fovBase + (CAM.fovDrive - CAM.fovBase) * speedFrac;
+  _curFov += (wantFov - _curFov) * camDamp(CAM.fovTau, dt);
+  camera.fov = _curFov; camera.updateProjectionMatrix();
   camera.lookAt(target.x + fx * 4, target.y, target.z + fz * 4);
 
   updateHud();
@@ -1159,6 +1193,7 @@ function exitVehicle() {
   player.mesh.position.copy(player.pos);
   playerVehicle = null;
   mode = 'foot';
+  _camInit = false;   // re-seed the on-foot camera cleanly (no swoop from the chase-cam position)
   if (crosshairEl) crosshairEl.classList.remove('hidden');
   updateHud();
 }

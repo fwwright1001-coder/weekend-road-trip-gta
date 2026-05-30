@@ -151,6 +151,7 @@ const police = {
     // ---- update foot cops ----
     for (let i = this._cops.length - 1; i >= 0; i--) {
       const cop = this._cops[i];
+      if (!cop) continue;   // list can be emptied mid-loop: a cop's shot can kill the player -> respawn -> GTA.reset -> police.clear()
       if (cop.dead) { this._retireCop(i); continue; }
       this._updateCop(cop, dt, ctx, world, player, px, pz);
     }
@@ -158,6 +159,7 @@ const police = {
     // ---- update cruisers ----
     for (let i = this._cars.length - 1; i >= 0; i--) {
       const car = this._cars[i];
+      if (!car) continue;   // same: clear() can empty this mid-loop
       if (car.dead) { this._retireCar(i); continue; }
       this._updateCar(car, dt, ctx, world, player, px, pz);
     }
