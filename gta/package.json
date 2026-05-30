@@ -1,0 +1,13 @@
+{
+  "name": "wrt-onfoot-gta-systems",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Crime-sandbox systems layer (wanted/police/economy/missions/radar) bolted onto the Weekend Road Trip on-foot mode. Browser-loaded as ES modules; this package.json only exists to run the headless alpha smoke test under Node.",
+  "scripts": {
+    "smoke": "node tools/onfoot-smoke.mjs"
+  },
+  "devDependencies": {
+    "three": "0.170.0"
+  }
+}
