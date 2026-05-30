@@ -1318,3 +1318,15 @@ if (/gta|playtest/i.test(location.hash) || /gta|playtest/i.test(location.search)
   // defer a frame so game.js has finished its own boot + initial applyScreen
   requestAnimationFrame(() => { try { enter(); } catch (e) { console.error('[ONFOOT] auto-enter failed', e); } });
 }
+
+// Title-screen entry: a visible "ENTER HEIST MODE" button (index.html #btn-heist)
+// so first-time players can jump into the on-foot heist without finishing the
+// drive or knowing the #gta link. The button carries no data-action, so game.js
+// ignores it and this is the only handler.
+{
+  const heistBtn = document.getElementById('btn-heist');
+  if (heistBtn) heistBtn.addEventListener('click', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    try { enter(); } catch (err) { console.error('[ONFOOT] heist-button enter failed', err); }
+  });
+}
