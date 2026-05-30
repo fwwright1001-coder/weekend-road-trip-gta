@@ -74,7 +74,7 @@ const heist = {
     if (getawayMesh) getawayMesh.visible = false;
   },
 
-  reset() { if (this.state !== 'won') this._restart(); },
+  reset() { /* keep heist progress across deaths/respawns; a full restart happens via forceRestart() on re-enter */ },
 
   update(dt, ctx) {
     if (!bank) return;
