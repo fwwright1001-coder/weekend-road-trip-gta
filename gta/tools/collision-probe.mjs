@@ -21,11 +21,12 @@ function extract(sig) {
   for (; k < src.length; k++) { const c = src[k]; if (c === '{') depth++; else if (c === '}') { depth--; if (depth === 0) { k++; break; } } }
   return src.slice(i, k);
 }
-// resolveCollision + insideBuilding both close over `aabbs` and `BOUND`.
+// resolveCollision + insideBuilding + moveAndCollide all close over `aabbs`/`BOUND`.
 const makeColliders = new Function('aabbs', 'BOUND',
   extract('function insideBuilding(x, z, pad) {') + '\n' +
   extract('function resolveCollision(pos, pad) {') + '\n' +
-  'return { insideBuilding, resolveCollision };');
+  extract('function moveAndCollide(pos, dx, dz, pad) {') + '\n' +
+  'return { insideBuilding, resolveCollision, moveAndCollide };');
 
 // ---- build the real bank, collect footprints --------------------------------
 const stubScene = { add() {} };
@@ -87,6 +88,34 @@ for (const [spd, name] of [[WALK, 'WALK'], [RUN, 'RUN']]) {
 {
   const end = march({ x: cx - 18, z: cz }, unit(1, 0), CAR_MAX_SPEED, 0.05, 400, CAR_RADIUS);
   check('car does NOT tunnel side wall at top speed', !isInterior(end), `end=(${end.x.toFixed(2)},${end.z.toFixed(2)})`);
+}
+
+// ---- the failure modes the iterate+sweep fix targets ----
+const { moveAndCollide } = makeColliders(aabbs, BOUND);
+// T6 — diagonal RUN grind into the MIDDLE of each solid wall (short marches, so
+// no sliding around to the door): the swept move must never let the walker
+// cross to the interior. Guards against squeeze/penetration regressions.
+{
+  const presses = [];
+  for (let z = cz - 5; z <= cz + 5; z += 0.75) for (const s of [-1, 1])     // left & right side walls
+    for (const slide of [-3, 3]) presses.push({ x: cx + s * 13, z, tx: cx, tz: z + slide });
+  for (let x = cx - 6; x <= cx + 6; x += 0.75)                              // back wall
+    for (const slide of [-3, 3]) presses.push({ x, z: cz - 13, tx: x + slide, tz: cz });
+  let breach = 0;
+  for (const ap of presses) {
+    const d = unit(ap.tx - ap.x, ap.tz - ap.z), p = { x: ap.x, z: ap.z };
+    for (let i = 0; i < 30; i++) moveAndCollide(p, d.x * RUN * 0.05, d.z * RUN * 0.05, PLAYER_R);
+    if (isInterior(p)) breach++;
+  }
+  check('diagonal RUN grind into wall middles never penetrates', breach === 0, `${breach}/${presses.length} breached`);
+}
+// T7 — a thin standalone wall + one lag-spike-sized lurch: the OLD single move +
+// one resolve tunnels straight through; the swept move must stop at the wall.
+{
+  const C = makeColliders([{ minX: -3, maxX: 3, minZ: -0.35, maxZ: 0.35 }], BOUND);
+  const naive = { x: 0, z: -2 }; naive.z += 3; C.resolveCollision(naive, PLAYER_R);   // move the whole 3u, then resolve once
+  const swept = { x: 0, z: -2 }; C.moveAndCollide(swept, 0, 3, PLAYER_R);             // substepped
+  check(`big-step tunneling fixed (naive tunneled to z=${naive.z.toFixed(2)}, past the wall)`, swept.z < -0.3, `swept stopped at z=${swept.z.toFixed(2)}`);
 }
 
 console.log(`\n${fail === 0 ? 'COLLISION-PROBE PASS ✅' : 'COLLISION-PROBE: ' + fail + ' LEAK(S) ❌'}  (${pass} pass / ${fail} fail)`);

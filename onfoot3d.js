@@ -671,21 +671,41 @@ function insideBuilding(x, z, pad) {
   }
   return null;
 }
-// push an XZ point out of any building it overlaps, along the shallowest axis
+// Push an XZ point out of every building AABB it overlaps, along the shallowest
+// axis. Iterated to convergence: resolving one box can shove the point into a
+// neighbour, and the old single pass left it stuck inside — that's what let you
+// squeeze through wall seams and inside corners. We re-run until nothing overlaps.
 function resolveCollision(pos, pad) {
-  for (const a of aabbs) {
-    if (pos.x > a.minX - pad && pos.x < a.maxX + pad && pos.z > a.minZ - pad && pos.z < a.maxZ + pad) {
-      const dl = pos.x - (a.minX - pad), dr = (a.maxX + pad) - pos.x;
-      const db = pos.z - (a.minZ - pad), df = (a.maxZ + pad) - pos.z;
-      const m = Math.min(dl, dr, db, df);
-      if (m === dl) pos.x = a.minX - pad;
-      else if (m === dr) pos.x = a.maxX + pad;
-      else if (m === db) pos.z = a.minZ - pad;
-      else pos.z = a.maxZ + pad;
+  for (let iter = 0; iter < 4; iter++) {
+    let hit = false;
+    for (const a of aabbs) {
+      if (pos.x > a.minX - pad && pos.x < a.maxX + pad && pos.z > a.minZ - pad && pos.z < a.maxZ + pad) {
+        const dl = pos.x - (a.minX - pad), dr = (a.maxX + pad) - pos.x;
+        const db = pos.z - (a.minZ - pad), df = (a.maxZ + pad) - pos.z;
+        const m = Math.min(dl, dr, db, df);
+        if (m === dl) pos.x = a.minX - pad;
+        else if (m === dr) pos.x = a.maxX + pad;
+        else if (m === db) pos.z = a.minZ - pad;
+        else pos.z = a.maxZ + pad;
+        hit = true;
+      }
     }
+    if (!hit) break;
   }
   pos.x = Math.max(-BOUND, Math.min(BOUND, pos.x));
   pos.z = Math.max(-BOUND, Math.min(BOUND, pos.z));
+}
+// Swept horizontal move: advance in steps no larger than ~half the collider
+// radius, resolving after each, so a fast move (or a laggy big-dt frame) can't
+// tunnel through a wall and corners resolve cleanly instead of letting you slip by.
+function moveAndCollide(pos, dx, dz, pad) {
+  const dist = Math.hypot(dx, dz);
+  const steps = Math.max(1, Math.ceil(dist / Math.max(0.05, pad * 0.5)));
+  const sx = dx / steps, sz = dz / steps;
+  for (let i = 0; i < steps; i++) {
+    pos.x += sx; pos.z += sz;
+    resolveCollision(pos, pad);
+  }
 }
 
 // ============================================================
@@ -805,10 +825,53 @@ function killPed(p) {
 // ENTER / EXIT — swap the whole view to the on-foot canvas
 // ============================================================
 let saved = null;
+// ---- loading screen --------------------------------------------------------
+// Building the scene + compiling shaders + uploading the procedural textures is
+// heavy and used to stutter the first second of play. We show this overlay, do
+// all that work plus a GPU warm-up behind it, and only start the loop once it's
+// ready — so gameplay begins smooth.
+let loadingEl = null, entering = false;
+function showLoading() {
+  const frame = document.getElementById('frame') || document.body;
+  if (!loadingEl) {
+    loadingEl = document.createElement('div');
+    loadingEl.id = 'foot-loading';
+    loadingEl.style.cssText = 'position:absolute;inset:0;z-index:30;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:radial-gradient(circle at 50% 38%,#14233a,#070f1c 78%);color:#eaf2ff;font-family:system-ui,Segoe UI,Roboto,sans-serif;transition:opacity .4s ease';
+    loadingEl.innerHTML =
+      '<div style="font-size:12px;letter-spacing:4px;color:#7fa8d8">WEEKEND ROAD TRIP</div>' +
+      '<div style="font-size:clamp(26px,5vw,46px);font-weight:800;letter-spacing:2px">LOADING…</div>' +
+      '<div style="width:min(60%,260px);height:6px;border-radius:3px;background:#1b2a42;overflow:hidden"><i id="foot-loading-bar" style="display:block;height:100%;width:15%;background:linear-gradient(90deg,#4f8cff,#7ee2b8);transition:width .35s ease"></i></div>' +
+      '<div id="foot-loading-label" style="font-size:13px;color:#9fb6d6">Preparing the city…</div>';
+    frame.appendChild(loadingEl);
+  }
+  loadingEl.style.display = 'flex';
+  loadingEl.style.opacity = '1';
+}
+function setLoading(label, pct) {
+  if (!loadingEl) return;
+  if (label) { const l = loadingEl.querySelector('#foot-loading-label'); if (l) l.textContent = label; }
+  if (pct != null) { const b = loadingEl.querySelector('#foot-loading-bar'); if (b) b.style.width = pct + '%'; }
+}
+function hideLoading() {
+  if (!loadingEl) return;
+  const el = loadingEl;
+  el.style.opacity = '0';
+  setTimeout(() => { el.style.display = 'none'; }, 430);
+}
+
 function enter() {
-  if (OF.active) return;
+  if (OF.active || entering) return;
+  entering = true;
+  showLoading();
+  setLoading('Preparing the city…', 15);
+  // let the overlay actually paint before the heavy synchronous build blocks us
+  requestAnimationFrame(() => requestAnimationFrame(enterBuild));
+}
+
+function enterBuild() {
   try {
-    if (!ensureInit()) return;
+    setLoading('Building the town…', 40);
+    if (!ensureInit()) { entering = false; hideLoading(); return; }
     localStorage.setItem('wrt.onfoot.unlocked', 'true');
     OF.active = true;
     // remember and hide the driving view
@@ -841,18 +904,43 @@ function enter() {
     showToast('You step out of the convertible. The town is yours.<br><b>Click</b> to look around &middot; <b>WASD</b> walk &middot; <b>Click</b> shoot &middot; <b>E</b> to steal any car');
     updateHud();
 
-    lastT = 0;
+    setLoading('Spinning up the city systems…', 60);
     if (OF.onEnter) OF.onEnter();    // boot the optional systems layer before the first frame
-    rafId = requestAnimationFrame(loop);
+    // wait for the layer's async pipeline (textures/lighting/post-FX) to settle,
+    // then warm the GPU, so the first real frames don't stutter.
+    waitForLayerThenWarm(0);
   } catch (e) {
     console.error('[ONFOOT] enter failed; staying in the base game', e);
-    exit();
+    entering = false; hideLoading(); exit();
   }
+}
+
+// Hold the loading screen until the optional systems layer signals its async
+// setup is done (OF.layerReady), then precompile shaders + prime a few frames so
+// play starts smooth. Falls through after ~4s if nothing ever signals.
+function waitForLayerThenWarm(tries) {
+  if (OF.layerReady === false && tries < 240) {
+    requestAnimationFrame(() => waitForLayerThenWarm(tries + 1));
+    return;
+  }
+  setLoading('Warming up…', 85);
+  try { resizeIfNeeded(); } catch (e) {}
+  try { renderer.compile(scene, camera); } catch (e) {}     // precompile every material's shader + upload textures
+  for (let i = 0; i < 3; i++) {                             // prime the post-FX composer (AA/AO/bloom) too
+    try { if (OF.renderHook) OF.renderHook(0.016); else renderer.render(scene, camera); } catch (e) {}
+  }
+  setLoading('Ready', 100);
+  hideLoading();
+  entering = false;
+  lastT = 0;
+  rafId = requestAnimationFrame(loop);
 }
 
 function exit() {
   if (OF.active && OF.onExit) OF.onExit();   // tear down the optional systems layer
   OF.active = false;
+  entering = false;
+  hideLoading();
   if (rafId) cancelAnimationFrame(rafId); rafId = 0;
   if (document.pointerLockElement === canvas) document.exitPointerLock();
   if (canvas) canvas.classList.add('hidden');
@@ -919,7 +1007,7 @@ function updateOnFoot(dt) {
   if (keys.has('KeyD') || keys.has('ArrowRight')) { mx += _right.x; mz += _right.z; }
   const ml = Math.hypot(mx, mz);
   const moving = ml > 0.001;
-  if (moving) { mx /= ml; mz /= ml; player.pos.x += mx * speed * dt; player.pos.z += mz * speed * dt; }
+  if (moving) { mx /= ml; mz /= ml; moveAndCollide(player.pos, mx * speed * dt, mz * speed * dt, PLAYER_R); }
 
   // gravity / jump / ground
   player.vy -= GRAV * dt;
@@ -978,9 +1066,7 @@ function updateDriving(dt) {
   // integrate position along heading; bleed speed on a wall hit
   const fx = Math.sin(v.heading), fz = Math.cos(v.heading);
   const px = v.pos.x, pz = v.pos.z;
-  v.pos.x += fx * v.speed * dt;
-  v.pos.z += fz * v.speed * dt;
-  resolveCollision(v.pos, CAR_RADIUS);
+  moveAndCollide(v.pos, fx * v.speed * dt, fz * v.speed * dt, CAR_RADIUS);
   const moved = Math.hypot(v.pos.x - px, v.pos.z - pz);
   const intended = Math.abs(v.speed) * dt;
   if (intended > 0.05 && moved < intended * 0.5) v.speed *= 0.25;  // crunched into a building

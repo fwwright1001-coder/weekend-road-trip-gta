@@ -328,6 +328,7 @@ function onEnter() {
     I = OF && OF.internals;
     if (!I || !I.scene) { console.warn('[GTA bridge] ONFOOT.internals not ready'); return; }
     OF.combatOwned = true;     // suppress onfoot3d's built-in pistol; combat.js owns weapons
+    OF.layerReady = true;      // loader gate — flipped false only while the async realism setup runs (below)
     if (!booted) {
       buildCtx();
       wireHost();
@@ -346,6 +347,7 @@ function onEnter() {
       // can't break the game, and it falls back to plain rendering on any failure.
       if (!I.headless && !_realismBuilt) {
         _realismBuilt = true;
+        window.ONFOOT.layerReady = false;   // hold the loading screen until this async setup settles
         Promise.all([import('./onfoot-textures.js'), import('./onfoot-render.js')]).then(async ([tex, rmod]) => {
           try { if (tex && tex.beautifyScene) tex.beautifyScene(I.THREE, I.scene, { envMapIntensity: 0.5 }); } catch (e) { console.warn('[GTA] beautify skipped', e); }
           try {
@@ -354,7 +356,8 @@ function onEnter() {
               if (rl && rl.render) { _realism = rl; window.ONFOOT.renderHook = (dt) => rl.render(dt); window.ONFOOT.onResize = (w, h) => rl.setSize(w, h); }
             }
           } catch (e) { console.warn('[GTA] realism pipeline skipped; plain render', e); }
-        }).catch((e) => console.warn('[GTA] realism modules unavailable; plain render', e));
+        }).catch((e) => console.warn('[GTA] realism modules unavailable; plain render', e))
+          .finally(() => { window.ONFOOT.layerReady = true; });   // release the loader once textures/lighting/post-FX are up (or have failed)
       }
       // loadout: Smeaglodin starts with a pistol + an AK-47, full health + armor
       const c = ctx.systems.combat && ctx.systems.combat.api;
