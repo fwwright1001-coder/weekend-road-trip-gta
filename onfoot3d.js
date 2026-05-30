@@ -138,6 +138,20 @@ function gunSound() {
 // A blocky "generic guy" — low-poly to match the road-trip art. Origin at the
 // feet (Y=0), ~1.8 tall. `armed` adds a pistol in the right hand.
 function buildPerson(colors, armed) {
+  // Rigged, animated model when the (optional) actor art loaded; else the
+  // procedural box-person below. Same contract: feet at origin, ~1.8 tall,
+  // facing +Z, userData.muzzle when armed, walk driven via animateWalk().
+  if (OF._makeActor) {
+    try {
+      const a = OF._makeActor({
+        armed,
+        colorize: armed ? null : colors.shirt,          // peds tinted toward their shirt colour for variety
+        scaleVar: 0.94 + Math.random() * 0.16,
+      });
+      if (a) return a;
+    } catch (e) { console.warn('[ONFOOT] actor build failed; procedural person', e); }
+  }
+
   const g = new THREE.Group();
 
   // --- helpers (defensive: nothing here may throw in a way that kills render) ---
@@ -864,8 +878,22 @@ function enter() {
   entering = true;
   showLoading();
   setLoading('Preparing the city…', 15);
-  // let the overlay actually paint before the heavy synchronous build blocks us
-  requestAnimationFrame(() => requestAnimationFrame(enterBuild));
+  // let the overlay paint, then load character art (async) BEFORE the town build
+  // so people spawn as rigged models; fully optional, falls back to procedural.
+  requestAnimationFrame(() => requestAnimationFrame(() => preloadActorArt(enterBuild)));
+}
+
+// Dynamic-import the optional rigged-character module + load its model, then
+// continue to the build. If anything fails, buildPerson uses procedural people.
+function preloadActorArt(next) {
+  if (OF._actorTried) { next(); return; }
+  OF._actorTried = true;
+  setLoading('Loading characters…', 28);
+  import('./gta/onfoot-actors.js')
+    .then((mod) => { OF._actorMod = mod; return mod.preloadActors(); })
+    .then((ok) => { if (ok && OF._actorMod) OF._makeActor = OF._actorMod.makeActor; })
+    .catch((e) => { console.warn('[ONFOOT] character art unavailable; procedural people', e); })
+    .finally(() => { try { next(); } catch (e) { console.error('[ONFOOT] build failed', e); entering = false; hideLoading(); } });
 }
 
 function enterBuild() {
@@ -1021,7 +1049,7 @@ function updateOnFoot(dt) {
   player.facing = lerpAngle(player.facing, targetFacing, 0.25);
   player.mesh.position.copy(player.pos);
   player.mesh.rotation.y = player.facing;
-  animateWalk(player.mesh, moving, dt);
+  animateWalk(player.mesh, moving, dt, speed);
 
   // reload / fire timers
   if (player.reloadT > 0) { player.reloadT -= dt; if (player.reloadT <= 0) { player.ammo = AMMO_MAX; updateHud(); } }
@@ -1185,9 +1213,14 @@ function startleNearby() {
   }
 }
 
-// cheap procedural walk: swing arms/legs opposite when moving
+// walk animation: drive the rigged model's AnimationMixer when present, else the
+// cheap procedural arm/leg swing.
 function animateWalk(mesh, moving, dt, sp) {
   const u = mesh.userData;
+  if (u.actor) {
+    if (OF._actorMod) OF._actorMod.updateActor(u.actor, dt, { moving, running: (sp || 0) >= 5.0, dead: !!u.dead });
+    return;
+  }
   if (!u.legL) return;
   u.phase = (u.phase || 0) + (moving ? (sp || WALK) * dt * 2.2 : 0);
   const s = moving ? Math.sin(u.phase) * 0.5 : 0;
