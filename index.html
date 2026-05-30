@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Weekend Road Trip — a 2D side-scrolling browser game. Drive Marty's convertible coast-to-coast on one tank of gas. ENGR 5513, Lipscomb MSAI." />
+  <title>Weekend Road Trip</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231a1a2e'/%3E%3Ctext x='16' y='22' font-size='18' text-anchor='middle' font-family='monospace' font-weight='bold' fill='%23f5d76e'%3E🚗%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Optional 3D renderer (feature/road-trip-3d): Three.js via CDN import map, no build step. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="stage">
+    <div id="frame">
+      <canvas id="game" width="960" height="540"></canvas>
+      <!-- 3D render target — overlays #game; render3d.js shows one or the other (press T to toggle). -->
+      <canvas id="game3d" width="960" height="540" class="hidden"></canvas>
+      <!-- Hidden on-foot mode (experiment/onfoot-gta): unlocked only after you finish the trip. -->
+      <canvas id="gamefoot" width="960" height="540" class="hidden"></canvas>
+      <pre id="rt3d-status" aria-hidden="true"></pre>
+
+      <!-- ============ On-foot HUD (the "step out of the car" mode) ============ -->
+      <div id="foot-crosshair" class="hidden" aria-hidden="true"></div>
+      <div id="foot-hud" class="hidden">
+        <div id="foot-toast" class="hidden"></div>
+        <div class="foot-stats" id="foot-stats-foot">
+          <div class="foot-stat"><span class="foot-label">AMMO</span><b id="foot-ammo">12 / 12</b></div>
+          <div class="foot-stat"><span class="foot-label">DOWNED</span><b id="foot-kills">0</b></div>
+        </div>
+        <div class="foot-stats hidden" id="foot-stats-drive">
+          <div class="foot-stat"><span class="foot-label">MPH</span><b id="foot-speed">0</b></div>
+        </div>
+        <div class="foot-controls">WASD move · MOUSE look · CLICK shoot · R reload · SPACE jump · SHIFT run · E steal/exit car · P quit</div>
+      </div>
+
+      <!-- ============ HUD overlay (visible during gameplay) ============ -->
+      <div id="hud" class="hidden">
+        <div class="hud-row top">
+          <div class="hud-card">
+            <div class="hud-label">SCORE</div>
+            <div class="hud-value" id="hud-score">000000</div>
+          </div>
+          <div class="hud-card">
+            <div class="hud-label">STAGE</div>
+            <div class="hud-value" id="hud-biome">CITY 1/4</div>
+          </div>
+          <div class="hud-card hud-trip">
+            <div class="hud-label">TRIP</div>
+            <div class="hud-trip-bar"><div class="hud-trip-fill" id="hud-trip"></div></div>
+          </div>
+        </div>
+        <div class="hud-row bottom">
+          <div class="hud-speedo">
+            <div class="hud-mph" id="hud-mph">0</div>
+            <div class="hud-mph-label">MPH</div>
+          </div>
+          <div class="hud-fuel">
+            <div class="hud-label">FUEL</div>
+            <div class="hud-fuel-bar"><div class="hud-fuel-fill" id="hud-fuel"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ Menu overlay (all non-gameplay screens) ============ -->
+      <div id="overlay">
+        <!-- Title -->
+        <div class="screen" id="screen-title">
+          <h1>WEEKEND ROAD TRIP</h1>
+          <p class="tagline">An American Vacation — Coast to Coast</p>
+          <p class="story">
+            Marty's been heads-down shipping for eleven months. Today his PTO
+            finally cleared. He throws a duffel in the convertible, points it
+            west, and drives. Dodge the potholes, duck the low signs, grab
+            roadside snacks. Don't run out of gas before you reach the ocean.
+          </p>
+          <button class="cta" data-action="start">START THE TRIP</button>
+          <div class="menu-actions">
+            <button data-action="scores">HIGH SCORES</button>
+            <button data-action="achievements">ACHIEVEMENTS</button>
+            <button data-action="ghost">GHOST RACE</button>
+            <button data-action="settings">SETTINGS</button>
+            <button data-action="help">CONTROLS</button>
+          </div>
+          <p class="ghost-status" id="ghost-title-status">No ghost loaded yet.</p>
+          <p class="credit">ENGR 5513 — Forrest Wright — Lipscomb MSAI 2026</p>
+        </div>
+
+        <!-- Paused -->
+        <div class="screen hidden" id="screen-paused">
+          <h2>PAUSED</h2>
+          <p class="muted">The road can wait. Take a breath.</p>
+          <button class="cta" data-action="resume">RESUME</button>
+          <button data-action="settings">SETTINGS</button>
+          <button data-action="quit">QUIT TO MENU</button>
+        </div>
+
+        <!-- Game Over -->
+        <div class="screen hidden" id="screen-gameover">
+          <h2 class="bad">OUT OF GAS</h2>
+          <p id="go-summary" class="story-short"></p>
+          <p class="score-line">FINAL SCORE  <span id="go-score">000000</span></p>
+          <button class="cta" data-action="continue">CONTINUE</button>
+        </div>
+
+        <!-- Win -->
+        <div class="screen hidden" id="screen-win">
+          <h2 class="good">YOU MADE IT!</h2>
+          <p class="story-short">
+            Marty rolls the convertible up to the boardwalk. The Atlantic
+            stretches out in front of him. He turns off the engine, takes a
+            breath, and reaches for his sunglasses.
+          </p>
+          <p class="score-line">FINAL SCORE  <span id="win-score">000000</span></p>
+          <div id="win-stats" class="run-stats"></div>
+          <button class="cta" data-action="continue">CONTINUE</button>
+          <p id="foot-prompt" class="foot-prompt hidden">…the engine ticks as it cools. Press <b>F</b> to step out of the car.</p>
+        </div>
+
+        <!-- Initials Entry -->
+        <div class="screen hidden" id="screen-initials">
+          <h2>NEW HIGH SCORE!</h2>
+          <p class="score-line">SCORE  <span id="initials-score">000000</span></p>
+          <p class="muted">Enter your initials:</p>
+          <div class="initials" id="initials-display">
+            <span class="initial active">A</span>
+            <span class="initial">A</span>
+            <span class="initial">A</span>
+          </div>
+          <p class="instructions">← → SELECT  ·  ↑ ↓ CHANGE  ·  A–Z TYPE  ·  ENTER SUBMIT</p>
+        </div>
+
+        <!-- High Scores -->
+        <div class="screen hidden" id="screen-scores">
+          <h2>HIGH SCORES</h2>
+          <ol id="scores-list" class="scores-list"></ol>
+          <button class="cta" data-action="return">RETURN</button>
+        </div>
+
+        <!-- Achievements -->
+        <div class="screen screen-wide hidden" id="screen-achievements">
+          <h2>ACHIEVEMENTS</h2>
+          <div id="achievements-list" class="achievements-list"></div>
+          <button class="cta" data-action="return">RETURN</button>
+        </div>
+
+        <!-- Ghost Race -->
+        <div class="screen screen-wide hidden" id="screen-ghost">
+          <h2>GHOST RACE</h2>
+          <p class="story-short" id="ghost-summary">
+            Finish a run to save a transparent replay car. Paste a classmate's
+            ghost JSON here to race their line.
+          </p>
+          <textarea id="ghost-payload" class="ghost-payload" spellcheck="false" aria-label="Ghost replay JSON"></textarea>
+          <div class="menu-actions">
+            <button class="cta" data-action="copy-ghost">COPY GHOST</button>
+            <button data-action="load-ghost">LOAD GHOST</button>
+            <button data-action="clear-ghost">CLEAR</button>
+          </div>
+          <p class="muted" id="ghost-message"></p>
+          <button data-action="return">RETURN</button>
+        </div>
+
+        <!-- Settings -->
+        <div class="screen hidden" id="screen-settings">
+          <h2>SETTINGS</h2>
+          <label class="setting-row">
+            <input type="checkbox" id="setting-shake" data-setting="screenShake" />
+            <span>Screen shake</span>
+          </label>
+          <label class="setting-row">
+            <input type="checkbox" id="setting-colorblind" data-setting="colorblind" />
+            <span>High-contrast colorblind palette</span>
+          </label>
+          <label class="setting-row">
+            <input type="checkbox" id="setting-ghost" data-setting="ghostVisible" />
+            <span>Show ghost replay car</span>
+          </label>
+          <p class="muted">Keyboard and gamepad are both active. A / Space jumps, B / down ducks, triggers brake/accelerate.</p>
+          <button class="cta" data-action="return">RETURN</button>
+        </div>
+
+        <!-- Help -->
+        <div class="screen hidden" id="screen-help">
+          <h2>CONTROLS</h2>
+          <table class="help-table">
+            <tr><td>SPACE / W / ↑</td><td>Jump over potholes &amp; cones</td></tr>
+            <tr><td>S / ↓</td><td>Duck under low signs</td></tr>
+            <tr><td>D / →</td><td>Accelerate</td></tr>
+            <tr><td>A / ←</td><td>Brake</td></tr>
+            <tr><td>P / ESC</td><td>Pause</td></tr>
+            <tr><td>M</td><td>Mute / unmute audio</td></tr>
+            <tr><td>GAMEPAD</td><td>A jump, B duck, triggers or D-pad drive</td></tr>
+            <tr><td>?</td><td>Toggle this help</td></tr>
+            <tr><td>ENTER</td><td>Confirm on menus</td></tr>
+          </table>
+          <p class="muted">
+            Grab green <strong style="color:#7ee27e">F</strong> cans for fuel,
+            yellow <strong style="color:#f5d76e">$</strong> snacks for points.
+            Reach the coast before your tank runs dry.
+          </p>
+          <button class="cta" data-action="return">RETURN</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="game.js"></script>
+  <script type="module" src="render3d.js"></script>
+  <script type="module" src="onfoot3d.js"></script>
+</body>
+</html>
