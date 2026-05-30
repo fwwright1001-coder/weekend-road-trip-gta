@@ -16,10 +16,10 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
-const MODEL_URL = new URL('../assets/models/RobotExpressive.glb', import.meta.url).href;
+const MODEL_URL = new URL('../assets/models/Soldier.glb', import.meta.url).href;
 const TARGET_HEIGHT = 1.8;          // normalize the model to ~human height (matches the box-person)
 const FACING = 0;                   // model front is +Z (matches buildPerson). If people face backward in-game, set Math.PI.
-const CLIPS = { idle: 'Idle', walk: 'Walking', run: 'Running', jump: 'Jump', death: 'Death', punch: 'Punch' };
+const CLIPS = { idle: 'Idle', walk: 'Walk', run: 'Run' };   // clips this model provides; missing ones are skipped gracefully
 
 let _src = null;        // { scene, animations }
 let _scale = 1;         // normalization scale
@@ -107,7 +107,7 @@ export function updateActor(actor, dt, st) {
   if (!actor || !actor.mixer) return;
   if (!actor.dead) {
     let want = 'idle';
-    if (st && st.dead) want = 'death';
+    if (st && st.dead && actor.actions.death) want = 'death';   // only if the model has a death clip
     else if (st && st.running) want = 'run';
     else if (st && st.moving) want = 'walk';
     if (want === 'death') actor.dead = true;

@@ -9,11 +9,11 @@ globalThis.self = globalThis;                       // GLTFLoader expects a glob
 const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
 const { clone } = await import('three/addons/utils/SkeletonUtils.js');
 
-const NEED = ['Idle', 'Walking', 'Running', 'Death'];   // clips onfoot-actors.js maps
+const NEED = ['Idle', 'Walk', 'Run'];   // clips onfoot-actors.js maps (Soldier.glb)
 let ok = true; const fail = (m) => { ok = false; console.log('FAIL ' + m); };
 
-const url = new URL('../../assets/models/RobotExpressive.glb', import.meta.url);
-if (!fs.existsSync(url)) { console.log('FAIL model missing at assets/models/RobotExpressive.glb'); process.exit(1); }
+const url = new URL('../../assets/models/Soldier.glb', import.meta.url);
+if (!fs.existsSync(url)) { console.log('FAIL model missing at assets/models/Soldier.glb'); process.exit(1); }
 const buf = fs.readFileSync(url);
 const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 
@@ -31,7 +31,7 @@ await new Promise((res) => new GLTFLoader().parse(ab, '', (gltf) => {
   try {
     const c = clone(gltf.scene);                    // per-instance skinned clone
     const mixer = new THREE.AnimationMixer(c);
-    const walk = THREE.AnimationClip.findByName(gltf.animations, 'Walking');
+    const walk = THREE.AnimationClip.findByName(gltf.animations, 'Walk');
     const act = mixer.clipAction(walk); act.play(); mixer.update(0.1); mixer.update(0.1);
   } catch (e) { fail('clone+mixer failed: ' + (e.message || e)); }
 

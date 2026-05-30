@@ -1,12 +1,15 @@
 # Asset credits
 
 3D models loaded at runtime (Three.js GLTFLoader). Layout/logic stay procedural;
-these are the art assets for the "full art conversion" pass.
+these are the art assets for the "full art conversion".
 
 ## Characters
-- **RobotExpressive.glb** — rigged + animated humanoid (Idle/Walking/Running/Jump/
-  Death/Punch + more). Used for the player and pedestrians (recolored/scaled per
-  spawn).
-  - Author: **Tomás Laulhé** (https://quaternius.com), modifications by
-    **Don McCurdy**. Sourced from the three.js examples (mrdoob/three.js).
-  - License: **CC0 1.0** (public domain dedication).
+- **Soldier.glb** — rigged + animated humanoid (clips: Idle / Walk / Run). Used
+  for the player and pedestrians (recolored/scaled per spawn for variety).
+  - Source: the **three.js** examples (`mrdoob/three.js`), a **Mixamo** (Adobe)
+    character + animations.
+  - License: **Mixamo / Adobe** — royalty-free for use in projects (incl.
+    commercial); not CC0. Embedded here as part of the game project + credited.
+  - Want strict CC0 instead? The pipeline (`gta/onfoot-actors.js`) is
+    asset-agnostic — swap `MODEL_URL` + the clip-name map and drop in any rigged
+    glTF with idle/walk/run.
