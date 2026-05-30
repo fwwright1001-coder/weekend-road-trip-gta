@@ -109,7 +109,7 @@ function makeVehiclesShim() {
       count: () => (I && I.vehicles ? I.vehicles.length : 0),
       playerVehicle: () => (I ? I.playerVehicle : null),
       nearestEnterable(pos) {
-        if (!I || !I.vehicles) return null;
+        if (!I || !I.vehicles || !pos) return null;
         let best = null, bd = Infinity;
         for (const v of I.vehicles) { if (v.occupied) continue; const d = Math.hypot(v.pos.x - pos.x, v.pos.z - pos.z); if (d < bd) { bd = d; best = v; } }
         return best;
@@ -376,7 +376,7 @@ function onEnter() {
     active = true;
     document.getElementById('gta-hud')?.classList.remove('hidden');
     document.body.classList.add('gta-active');
-    GTA.bus.emit('toast', { html: 'Heist time. Get to the <b>bank</b> (radar marker), grab the <b>goop</b> from the vault, then <b>escape in a car</b>. Cops will come — fight or flee.', ms: 8000 });
+    GTA.bus.emit('toast', { html: 'Heist time. Get to the <b>bank</b> (radar marker), grab the <b>goop</b> from the vault, then <b>escape in a car</b>. Cops will come — fight or flee.<br>You’re carrying a <b>pistol</b> + <b>AK-47</b> — <b>Tab</b> or <b>1-5</b> to switch, <b>R</b> to reload.', ms: 8000 });
   } catch (e) { console.error('[GTA bridge] onEnter failed; base on-foot mode unaffected', e); }
 }
 
@@ -441,6 +441,9 @@ function onKill(ped) {
 }
 function onJack(v) {
   if (!active) return;
+  // sync the player flag immediately (onTick also maintains it each frame, but
+  // this avoids a one-frame window where code reads a stale inVehicle=false)
+  ctx.player.inVehicle = true; ctx.player.vehicle = v;
   try { GTA.bus.emit('vehicle:jacked', { vehicle: v }); emitCrime('propertyDamage', v && v.pos, 0.3); } catch (e) {}
 }
 

@@ -17,6 +17,7 @@ import { buildBank } from './onfoot-bank.js';
 const REACH_BANK = 5.0;     // trigger "inside" near the door
 const REACH_VAULT = 3.2;    // grab the goop
 const REACH_GETAWAY = 7.0;  // escape (must be in a vehicle)
+const PAYOUT = 5000;        // heist completion reward ($)
 
 let bank = null;            // {position, doorPos, vaultPos, footprints}
 let goopMesh = null, beacon = null, getawayMesh = null;
@@ -96,12 +97,27 @@ const heist = {
         if (goopMesh) goopMesh.visible = false;
         if (getawayMesh) getawayMesh.visible = true;
         if (beacon) { beacon.position.x = GETAWAY.x; beacon.position.z = GETAWAY.z; beacon.material.color.setHex(0x5aff8a); }
-        // ALARM — heat spikes, the cops come
-        try { if (ctx.systems.wanted) { ctx.systems.wanted.api.add(7); ctx.systems.wanted.api.setSeen(true); } } catch (e) {}
+        // ALARM — the heat RAMPS up (~2 -> ~3 -> 5 stars over ~2s) instead of
+        // snapping straight to max, so you get a beat to react before the full
+        // swarm. The rest of the climb happens in the 'escape' branch below.
+        this._alarm = { t: 0, beat: 0 };
+        try { if (ctx.systems.wanted) { ctx.systems.wanted.api.add(2.5); ctx.systems.wanted.api.setSeen(true); } } catch (e) {}
         GTA.bus.emit('shake', { amount: 1.0 });
         GTA.bus.emit('toast', { html: 'You’ve got the <b>goop</b>! Alarm’s tripped — <b>steal a car and escape</b> to the green marker.', ms: 7000 });
       }
     } else if (this.state === 'escape') {
+      // escalate the alarm over a couple of seconds and keep it blaring until you're clear
+      if (this._alarm) {
+        this._alarm.t += dt;
+        try {
+          const w = ctx.systems.wanted;
+          if (w) {
+            w.setSeen(true);
+            if (this._alarm.beat === 0 && this._alarm.t > 0.7) { w.add(2); this._alarm.beat = 1; }
+            else if (this._alarm.beat === 1 && this._alarm.t > 1.6) { w.add(3); this._alarm.beat = 2; }
+          }
+        } catch (e) {}
+      }
       if (getawayMesh) getawayMesh.material.opacity = 0.16 + Math.sin(t * 3) * 0.08;
       if (ctx.player.inVehicle && dist(p, GETAWAY) < REACH_GETAWAY) {
         this.state = 'won';
@@ -111,12 +127,14 @@ const heist = {
   },
 
   _win(ctx) {
-    try { if (ctx.systems.economy) ctx.systems.economy.api.add(5000, 'heist'); } catch (e) {}
+    let total = null;
+    try { if (ctx.systems.economy) total = ctx.systems.economy.api.add(PAYOUT, 'heist'); } catch (e) {}   // add() returns the new balance
     try { if (ctx.systems.wanted) ctx.systems.wanted.api.clear(); } catch (e) {}
     if (beacon) beacon.visible = false;
     if (getawayMesh) getawayMesh.visible = false;
-    showWin();
-    GTA.bus.emit('toast', { html: '<b>HEIST COMPLETE</b> — you escaped with the goop. +$5000', ms: 9000 });
+    showWin(total);
+    const totalTxt = (typeof total === 'number' && isFinite(total)) ? ` (total $${total.toLocaleString('en-US')})` : '';
+    GTA.bus.emit('toast', { html: `<b>HEIST COMPLETE</b> — escaped with the goop. +$${PAYOUT.toLocaleString('en-US')}${totalTxt}`, ms: 9000 });
   },
 
   api: {
@@ -146,7 +164,7 @@ const heist = {
 
 function dist(a, b) { return Math.hypot(a.x - b.x, a.z - b.z); }
 
-function showWin() {
+function showWin(total) {
   const frame = document.getElementById('frame') || document.body;
   if (!winEl) {
     winEl = document.createElement('div');
@@ -155,9 +173,14 @@ function showWin() {
       + 'background:radial-gradient(circle at 50% 40%, rgba(20,40,24,0.4), rgba(0,0,0,0.78));'
       + 'font-family:Georgia,serif;color:#eafbe6;pointer-events:none;opacity:0;transition:opacity .8s;';
     winEl.innerHTML = '<div><div style="font-size:clamp(34px,8vw,92px);font-weight:900;letter-spacing:6px;color:#7ee27e;text-shadow:0 4px 24px rgba(0,0,0,.8)">HEIST COMPLETE</div>'
-      + '<div style="margin-top:14px;font-size:clamp(14px,2.4vw,22px);color:#dfead9">Smeaglodin escaped with the goop. &nbsp;+$5000</div>'
+      + '<div id="gta-win-take" style="margin-top:14px;font-size:clamp(14px,2.4vw,22px);color:#dfead9"></div>'
       + '<div style="margin-top:10px;font-size:13px;color:#9fb89a">Press <b>P</b> to quit the mode</div></div>';
     frame.appendChild(winEl);
+  }
+  const take = winEl.querySelector('#gta-win-take');
+  if (take) {
+    const totalTxt = (typeof total === 'number' && isFinite(total)) ? ` &nbsp;·&nbsp; Total <b>$${total.toLocaleString('en-US')}</b>` : '';
+    take.innerHTML = `Smeaglodin escaped with the goop. &nbsp;<b>+$${PAYOUT.toLocaleString('en-US')}</b>${totalTxt}`;
   }
   winEl.style.display = 'grid';
   requestAnimationFrame(() => { if (winEl) winEl.style.opacity = '1'; });
