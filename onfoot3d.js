@@ -35,6 +35,7 @@ const PED_R = 0.42;          // pedestrian radius
 const EYE = 1.55;            // head/aim height above feet
 const CAM_DIST = 5.6;        // third-person camera distance
 const MOUSE_SENS = 0.0022;   // pointer-lock look sensitivity
+const TURN_RATE = 2.4;       // Q/E keyboard turn rate (rad/s) — turning works even without pointer lock
 const PITCH_MIN = -0.95, PITCH_MAX = 0.55;
 const MAX_RANGE = 140;       // bullet reach
 const HIT_R = 1.0;           // how close the aim ray must pass a ped to hit
@@ -773,9 +774,18 @@ function onKeyUp(e) {
   e.stopImmediatePropagation();
   keys.delete(e.code);
 }
+function tryPointerLock() {
+  // robust request: focus the canvas, request inside the click gesture, and surface
+  // a denial instead of failing silently (Q/E still turn the player either way)
+  try {
+    if (canvas.focus) canvas.focus();
+    const p = canvas.requestPointerLock && canvas.requestPointerLock();
+    if (p && typeof p.catch === 'function') p.catch((err) => console.warn('[ONFOOT] pointer lock denied — use Q/E to turn', err));
+  } catch (err) { console.warn('[ONFOOT] pointer lock failed — use Q/E to turn', err); }
+}
 function onMouseDown(e) {
   if (!OF.active || mode !== 'foot') return;             // no shooting from the driver's seat
-  if (!locked) { canvas.requestPointerLock(); return; }
+  if (!locked) { tryPointerLock(); return; }             // first click grabs the mouse for look; Q/E turn regardless
   if (e.button === 0) fire();
 }
 function onMouseMove(e) {
@@ -1039,6 +1049,9 @@ function update(dt) {
 }
 
 function updateOnFoot(dt) {
+  // keyboard turn fallback — Q turns left, E turns right; works with or without pointer lock
+  if (keys.has('KeyQ')) yaw += TURN_RATE * dt;
+  if (keys.has('KeyE')) yaw -= TURN_RATE * dt;
   // --- player movement relative to camera yaw ---
   // The camera looks toward +_fwd (see camera block below), so forward = +_fwd
   // and screen-right = +_right (matches the camera basis: W into screen, D right).
@@ -1062,8 +1075,8 @@ function updateOnFoot(dt) {
   resolveCollision(player.pos, PLAYER_R);
 
   // body faces camera yaw when aiming (locked), else faces movement direction
-  const targetFacing = (locked || !moving) ? yaw : Math.atan2(mx, mz);
-  player.facing = lerpAngle(player.facing, targetFacing, 0.25);
+  const targetFacing = yaw;   // body faces the aim/view direction; movement stays strafe-relative (tighter TPS feel)
+  player.facing = lerpAngle(player.facing, targetFacing, 0.35);
   player.mesh.position.copy(player.pos);
   player.mesh.rotation.y = player.facing;
   animateWalk(player.mesh, moving, dt, speed);
