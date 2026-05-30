@@ -70,6 +70,32 @@ const OF = {
 };
 window.ONFOOT = OF;
 
+// ---- camera & movement "feel" (live-tunable from the console) --------------
+// Decoupled from aim: the camera ORIENTATION is locked to yaw/pitch (so the
+// crosshair ray stays exact), while its POSITION eases toward the ideal spot
+// behind the head — that lag is what reads as "smooth." All rates are
+// frame-rate-independent (1 - e^(-rate*dt)). Tweak via window.ONFOOT_CAM.
+const CAM = {
+  dist: CAM_DIST,      // distance behind the head
+  height: 0.45,        // how far above the head the camera sits
+  posRate: 12,         // position follow speed (higher = snappier)
+  fov: 62,             // base field of view
+  fovRun: 67,          // FOV when moving fast (sense of speed)
+  fovRate: 6,          // FOV ease speed
+  recoilKick: 0.16,    // radians of upward view kick per unit of recoil
+  recoilDecay: 2.6,    // how fast the recoil kick recovers
+  minY: 0.6,           // never let the camera dip below this
+  collidePad: 0.5,     // wall-collision padding when pulling the camera in
+};
+window.ONFOOT_CAM = CAM;
+const MOVE = {
+  groundAccel: 55,     // units/s^2 toward target velocity on the ground
+  groundDecel: 42,     // units/s^2 back toward 0 when no input
+  airAccel: 16,        // weaker control in the air
+  turnRate: 13,        // body-yaw follow speed (frame-rate independent)
+};
+window.ONFOOT_MOVE = MOVE;
+
 // ---- module state ----------------------------------------------------------
 let scene, camera, renderer, canvas;
 let initialized = false;
@@ -83,6 +109,7 @@ let recoil = 0;              // transient upward kick, decays each frame
 
 const player = {
   pos: new THREE.Vector3(2.4, 0, 6),
+  vx: 0, vz: 0,            // horizontal velocity (momentum) — smoothed each frame
   vy: 0,
   grounded: true,
   mesh: null,
@@ -925,9 +952,10 @@ function enterBuild() {
     mode = 'foot'; playerVehicle = null;
     if (player.mesh) player.mesh.visible = true;
     for (const v of vehicles) { v.occupied = false; v.speed = 0; v.mesh.rotation.z = 0; }
-    player.pos.set(2.4, 0, 6); player.vy = 0; player.grounded = true;
+    player.pos.set(2.4, 0, 6); player.vx = 0; player.vz = 0; player.vy = 0; player.grounded = true;
     player.ammo = AMMO_MAX; player.reloadT = 0; player.fireT = 0;
     yaw = Math.PI; pitch = -0.1; recoil = 0; kills = 0;
+    if (camera) { camera.fov = CAM.fov; camera.updateProjectionMatrix(); }
     keys.clear();
     showToast('You step out of the convertible. The town is yours.<br><b>Click</b> to look around &middot; <b>WASD</b> walk &middot; <b>Click</b> shoot &middot; <b>E</b> to steal any car');
     updateHud();
@@ -1021,21 +1049,49 @@ function update(dt) {
   if (OF.onTick) OF.onTick(dt);   // optional systems layer (gta/onfoot-bridge.js)
 }
 
+// Pull a desired camera spot toward the head if a building wall sits between
+// them, so the third-person camera never clips inside geometry. Marches a few
+// samples from head -> desired and stops at the last one that's in open air.
+function camClampToWalls(head, desired) {
+  const dx = desired.x - head.x, dz = desired.z - head.z;
+  const steps = 6;
+  let frac = 1;
+  for (let i = 1; i <= steps; i++) {
+    const f = i / steps;
+    if (insideBuilding(head.x + dx * f, head.z + dz * f, CAM.collidePad)) { frac = (i - 1) / steps; break; }
+  }
+  if (frac < 1) { desired.x = head.x + dx * frac; desired.z = head.z + dz * frac; }
+}
+
 function updateOnFoot(dt) {
-  // --- player movement relative to camera yaw ---
-  // The camera looks toward +_fwd (see camera block below), so forward = +_fwd
-  // and screen-right = +_right (matches the camera basis: W into screen, D right).
+  // --- desired move direction relative to camera yaw ---
+  // The camera looks toward +_fwd, so forward = +_fwd and screen-right = +_right
+  // (matches the camera basis: W into screen, D right).
   _fwd.set(Math.sin(yaw), 0, Math.cos(yaw));            // camera horizontal forward (into screen)
   _right.set(-Math.cos(yaw), 0, Math.sin(yaw));         // camera-right (screen right)
-  const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight')) ? RUN : WALK;
+  const running = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const targetSpeed = running ? RUN : WALK;
   let mx = 0, mz = 0;
   if (keys.has('KeyW') || keys.has('ArrowUp')) { mx += _fwd.x; mz += _fwd.z; }
   if (keys.has('KeyS') || keys.has('ArrowDown')) { mx -= _fwd.x; mz -= _fwd.z; }
   if (keys.has('KeyA') || keys.has('ArrowLeft')) { mx -= _right.x; mz -= _right.z; }
   if (keys.has('KeyD') || keys.has('ArrowRight')) { mx += _right.x; mz += _right.z; }
   const ml = Math.hypot(mx, mz);
-  const moving = ml > 0.001;
-  if (moving) { mx /= ml; mz /= ml; moveAndCollide(player.pos, mx * speed * dt, mz * speed * dt, PLAYER_R); }
+  const hasInput = ml > 0.001;
+  if (hasInput) { mx /= ml; mz /= ml; }
+
+  // --- momentum: ease velocity toward the target instead of snapping ---
+  // (instant velocity is what made the old movement feel robotic). Accelerate
+  // at a fixed units/s^2 so there's a brief, readable ramp up and glide to stop.
+  const tvx = hasInput ? mx * targetSpeed : 0;
+  const tvz = hasInput ? mz * targetSpeed : 0;
+  const rate = (hasInput ? (player.grounded ? MOVE.groundAccel : MOVE.airAccel) : MOVE.groundDecel) * dt;
+  const dvx = tvx - player.vx, dvz = tvz - player.vz;
+  const dvl = Math.hypot(dvx, dvz);
+  if (dvl > 1e-5) { const step = Math.min(dvl, rate); player.vx += (dvx / dvl) * step; player.vz += (dvz / dvl) * step; }
+  const speedNow = Math.hypot(player.vx, player.vz);
+  const moving = speedNow > 0.05;
+  if (moving) moveAndCollide(player.pos, player.vx * dt, player.vz * dt, PLAYER_R);
 
   // gravity / jump / ground
   player.vy -= GRAV * dt;
@@ -1044,26 +1100,41 @@ function updateOnFoot(dt) {
 
   resolveCollision(player.pos, PLAYER_R);
 
-  // body faces camera yaw when aiming (locked), else faces movement direction
-  const targetFacing = (locked || !moving) ? yaw : Math.atan2(mx, mz);
-  player.facing = lerpAngle(player.facing, targetFacing, 0.25);
+  // body faces aim (when looking around) else the direction it's actually moving;
+  // frame-rate-independent so it turns the same at 60 and 144 Hz.
+  const targetFacing = (locked || !moving) ? yaw : Math.atan2(player.vx, player.vz);
+  player.facing = lerpAngle(player.facing, targetFacing, 1 - Math.exp(-MOVE.turnRate * dt));
   player.mesh.position.copy(player.pos);
   player.mesh.rotation.y = player.facing;
-  animateWalk(player.mesh, moving, dt, speed);
+  // aiming = pointer-locked on foot with a gun (drives the procedural aim pose)
+  const aiming = locked && !!player.muzzle;
+  animateWalk(player.mesh, moving, dt, speedNow, { aiming, pitch, recoil });
 
   // reload / fire timers
   if (player.reloadT > 0) { player.reloadT -= dt; if (player.reloadT <= 0) { player.ammo = AMMO_MAX; updateHud(); } }
   if (player.fireT > 0) player.fireT -= dt;
 
-  // --- camera: third-person orbit behind the player ---
-  const cz = Math.cos(pitch);
-  _dir.set(Math.sin(yaw) * cz, Math.sin(pitch), Math.cos(yaw) * cz); // look direction
-  const head = _v.copy(player.pos).setY(EYE);
-  camera.position.copy(head).addScaledVector(_dir, -CAM_DIST);       // behind the head
-  camera.position.y += 0.4 + recoil * 2;
-  if (camera.position.y < 0.6) camera.position.y = 0.6;
-  camera.lookAt(head.x + _dir.x, head.y + _dir.y + recoil, head.z + _dir.z);
-  recoil = Math.max(0, recoil - dt * 0.6);
+  // --- camera: damped third-person orbit; orientation locked to aim ---
+  // Orientation is set straight from yaw/pitch (forward === aim dir) so the
+  // crosshair maps to the exact hitscan ray; only the POSITION is smoothed.
+  const pitchAim = pitch + recoil * CAM.recoilKick;            // recoil kicks the view up
+  const cz = Math.cos(pitchAim);
+  _dir.set(Math.sin(yaw) * cz, Math.sin(pitchAim), Math.cos(yaw) * cz);
+  const head = _v.copy(player.pos); head.y += EYE;
+  const desired = _v2.copy(head).addScaledVector(_dir, -CAM.dist); desired.y += CAM.height;
+  camClampToWalls(head, desired);                             // don't clip through buildings
+  camera.position.lerp(desired, 1 - Math.exp(-CAM.posRate * dt));
+  if (camera.position.y < CAM.minY) camera.position.y = CAM.minY;
+  // look exactly along the aim dir => camera.getWorldDirection() === aim ray
+  camera.lookAt(camera.position.x + _dir.x, camera.position.y + _dir.y, camera.position.z + _dir.z);
+
+  // speed-based FOV: a little wider when hustling, for a sense of pace
+  const fovTarget = speedNow > WALK + 0.5 ? CAM.fovRun : CAM.fov;
+  if (Math.abs(camera.fov - fovTarget) > 0.03) {
+    camera.fov += (fovTarget - camera.fov) * (1 - Math.exp(-CAM.fovRate * dt));
+    camera.updateProjectionMatrix();
+  }
+  recoil = Math.max(0, recoil - dt * CAM.recoilDecay);
 }
 
 // ============================================================
@@ -1215,10 +1286,13 @@ function startleNearby() {
 
 // walk animation: drive the rigged model's AnimationMixer when present, else the
 // cheap procedural arm/leg swing.
-function animateWalk(mesh, moving, dt, sp) {
+function animateWalk(mesh, moving, dt, sp, opts) {
   const u = mesh.userData;
   if (u.actor) {
-    if (OF._actorMod) OF._actorMod.updateActor(u.actor, dt, { moving, running: (sp || 0) >= 5.0, dead: !!u.dead });
+    if (OF._actorMod) OF._actorMod.updateActor(u.actor, dt, {
+      moving, running: (sp || 0) >= 5.0, dead: !!u.dead,
+      aiming: !!(opts && opts.aiming), pitch: opts ? (opts.pitch || 0) : 0, recoil: opts ? (opts.recoil || 0) : 0,
+    });
     return;
   }
   if (!u.legL) return;
