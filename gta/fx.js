@@ -43,6 +43,17 @@ const SHAKE_ROLL = 0.018;     // radians of camera roll at full shake (dialed do
 const STRIDE = 2.15;          // world-units between footstep sounds while walking
 const PGRAV = 16;             // particle gravity (units/s^2)
 
+// ---- vehicle drift/skid feedback (Lane B "driving juice") ------------------
+const SKID_CAP = 96;          // max live skid-mark decals (pooled thin dark quads on the ground)
+const SKID_SLIP = 4;          // slip magnitude above which the tires lose grip and mark/smoke
+const SKID_Y = 0.02;          // decal height above the road (avoids z-fighting with the ground)
+const SKID_FADE = 6.0;        // seconds a skid mark takes to fade fully away
+const SKID_MIN_GAP = 0.35;    // world-units a rear wheel must travel before laying the next mark
+const SKID_HALF_W = 0.16;     // half-width of a tire contact patch (decal cross-car size)
+const REAR_OFFSET = 1.4;      // how far behind the car centre the rear axle sits (+Z is the nose)
+const TRACK_HALF = 0.7;       // half the track width (left/right rear wheel separation)
+const SMOKE_SLIP = 5;         // slip above which we also kick up tire smoke (a touch above marks)
+
 // surface presets for spawnImpact — colour + behaviour per material hit
 const SURFACES = {
   world: { spark: 0xffd27a, sparkN: 7, dust: 0xb9b2a6, dustN: 5, thud: 'world' },
@@ -83,6 +94,13 @@ const LIGHT_CAP = 6;
 let _lights = null;           // { items:[{light,life,maxLife,base}], head }
 // menu-controllable shake (settings: toggle + intensity)
 let _shakeScale = 1, _shakeEnabled = false;   // screen shake fully removed per Forrest's request (2026-05)
+
+// SKID MARKS — a fixed pool of thin dark ground quads laid behind the rear wheels
+// when the player car is sliding (slip high) or braking hard. Ring-buffer: the
+// oldest mark is recycled when the pool is full. Each fades out over SKID_FADE.
+let _skids = null;            // { items:[{mesh,mat,life,maxLife}], head, geo }
+// last sampled rear-wheel ground positions, so we only drop a mark every SKID_MIN_GAP
+let _skidLast = null;         // { lx, lz, rx, rz } or null when not currently skidding
 
 // footstep pacing
 let _lastFoot = null;         // {x,z} player pos at last footstep sample
@@ -410,17 +428,129 @@ function casingPing(gain) {
   catch (e) { /* optional */ }
 }
 
+// ============================================================
+// VEHICLE DRIFT FEEDBACK — skid-mark decals (pooled flat quads) + tire smoke.
+// Driven from update() off ctx.player.vehicle.slip/.pos/.heading/.speed. Cheap:
+// a fixed pool of thin dark planes laid on the ground behind the rear wheels,
+// recycled oldest-first, fading over SKID_FADE; smoke reuses the _smoke Points
+// system (same path as skidDust). No-ops when not driving / low slip / headless.
+// ============================================================
+function buildSkids() {
+  if (_skids || _headless || !THREE || !_scene) return;
+  try {
+    // a unit quad in the XZ plane (rotated flat): 1 wide (cross-car) x 1 long (along travel)
+    const geo = new THREE.PlaneGeometry(1, 1);
+    geo.rotateX(-Math.PI / 2);   // lie flat on the ground, facing +Y
+    const items = [];
+    for (let i = 0; i < SKID_CAP; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x141210, transparent: true, opacity: 0,
+        depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = false; mesh.receiveShadow = false;
+      mesh.visible = false; mesh.renderOrder = 1;   // under sparks/casings, above the road
+      _scene.add(mesh);
+      items.push({ mesh, mat, life: 0, maxLife: SKID_FADE });
+    }
+    _skids = { items, head: 0, geo };
+  } catch (e) { _skids = null; }
+}
+
+// lay one skid quad at (x,z), oriented along `heading` (radians; +Z = nose at h=0)
+function spawnSkid(x, z, heading) {
+  try {
+    if (!_skids || x == null || z == null) return;
+    const s = _skids.items[_skids.head];
+    _skids.head = (_skids.head + 1) % _skids.items.length;
+    s.mesh.position.set(x, SKID_Y, z);
+    s.mesh.rotation.y = heading;                          // long axis runs along the car's travel
+    // length grows a touch with the gap so consecutive marks read as one continuous streak
+    s.mesh.scale.set(SKID_HALF_W * 2, 1, SKID_MIN_GAP * 1.8);
+    s.mat.opacity = 0.55;
+    s.mesh.visible = true;
+    s.life = SKID_FADE; s.maxLife = SKID_FADE;
+  } catch (e) { /* optional */ }
+}
+
+function stepSkids(dt) {
+  if (!_skids) return;
+  for (const s of _skids.items) {
+    if (s.life <= 0) continue;
+    s.life -= dt;
+    if (s.life <= 0) { s.mesh.visible = false; s.mat.opacity = 0; continue; }
+    s.mat.opacity = 0.55 * (s.life / s.maxLife);          // linear fade to nothing
+  }
+}
+
+// tire smoke — a couple of soft pale puffs rising off a slipping rear wheel.
+// reuses the existing _smoke Points system (same emit path as skidDust).
+function tireSmoke(x, z, vx, vz) {
+  try {
+    if (!_particlesOk || !_smoke || x == null || z == null) return;
+    const c = new THREE.Color(0xc9c4ba);
+    for (let i = 0; i < 2; i++) {
+      const sp = 0.4 + Math.random() * 1.0;
+      emit(_smoke, x, 0.12 + Math.random() * 0.1, z,
+        (Math.random() * 2 - 1) * sp - (vx || 0) * 0.12, Math.random() * 0.9 + 0.4, (Math.random() * 2 - 1) * sp - (vz || 0) * 0.12,
+        0.3 + Math.random() * 0.25, 0.55 + Math.random() * 0.4,
+        c.r, c.g, c.b, 2.6, -0.4);                        // negative grav → buoyant, rises as it fades
+    }
+  } catch (e) { /* optional */ }
+}
+
+// per-frame driver: read the player vehicle's slip/pos/heading and, when sliding
+// or braking hard, drop skid decals + tire smoke behind BOTH rear wheels.
+function updateDrift(dt) {
+  try {
+    const pl = _ctx && _ctx.player;
+    if (!pl || !pl.inVehicle) { _skidLast = null; return; }
+    const v = pl.vehicle;
+    if (!v || !v.pos || v.pos.x == null || v.pos.z == null) { _skidLast = null; return; }
+    const slip = (typeof v.slip === 'number' && Number.isFinite(v.slip)) ? v.slip : 0;
+    const speed = (typeof v.speed === 'number' && Number.isFinite(v.speed)) ? v.speed : 0;
+    // braking-hard heuristic: holding the brake/back key while moving with some lateral load.
+    const keys = _ctx.input && _ctx.input.keys;
+    const braking = !!(keys && (keys.has('Space') || keys.has('KeyS') || keys.has('ArrowDown'))) && Math.abs(speed) > 6;
+    const marking = slip > SKID_SLIP || (braking && slip > SKID_SLIP * 0.5);
+    if (!marking) { _skidLast = null; return; }
+
+    const h = (typeof v.heading === 'number' && Number.isFinite(v.heading)) ? v.heading : 0;
+    // +Z is the nose at heading 0 → forward = (sin h, cos h); right = (cos h, -sin h).
+    const fx = Math.sin(h), fz = Math.cos(h);
+    const rx = Math.cos(h), rz = -Math.sin(h);
+    const cx = v.pos.x - fx * REAR_OFFSET, cz = v.pos.z - fz * REAR_OFFSET;   // rear-axle centre
+    const lX = cx - rx * TRACK_HALF, lZ = cz - rz * TRACK_HALF;               // left rear wheel
+    const rX = cx + rx * TRACK_HALF, rZ = cz + rz * TRACK_HALF;               // right rear wheel
+
+    // travel-gated decals: only drop a new mark once a wheel has moved SKID_MIN_GAP.
+    if (!_skidLast) {
+      _skidLast = { lx: lX, lz: lZ, rx: rX, rz: rZ };
+      spawnSkid(lX, lZ, h); spawnSkid(rX, rZ, h);
+    } else {
+      if (Math.hypot(lX - _skidLast.lx, lZ - _skidLast.lz) >= SKID_MIN_GAP) { spawnSkid(lX, lZ, h); _skidLast.lx = lX; _skidLast.lz = lZ; }
+      if (Math.hypot(rX - _skidLast.rx, rZ - _skidLast.rz) >= SKID_MIN_GAP) { spawnSkid(rX, rZ, h); _skidLast.rx = rX; _skidLast.rz = rZ; }
+    }
+
+    // tire smoke while the slide is strong (rate-limited by the puff cap itself).
+    if (slip > SMOKE_SLIP && Math.random() < 0.6) {
+      const wvx = fx * speed, wvz = fz * speed;   // approx wheel velocity for puff drift
+      tireSmoke(lX, lZ, wvx, wvz); tireSmoke(rX, rZ, wvx, wvz);
+    }
+  } catch (e) { /* never throw out of the frame loop */ }
+}
+
 // muzzle sparks — a few bright forward specks to sit under combat's tracer/flash
 function muzzleSparks(pos, dir) {
   try {
     if (!_particlesOk || !_spark || !pos || pos.x == null) return;
     const dx = dir ? dir.x : 0, dy = dir ? dir.y : 0, dz = dir ? dir.z : 1;
     const c = new THREE.Color(0xffe08a);
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {                            // a touch punchier flash (was 6) — still pooled, capped by SPARK_CAP
       const sp = 3 + Math.random() * 5;
       emit(_spark, pos.x, pos.y != null ? pos.y : 1.2, pos.z,
         dx * sp + (Math.random() * 2 - 1) * 1.5, dy * sp + (Math.random() * 2 - 1) * 1.5 + 0.5, dz * sp + (Math.random() * 2 - 1) * 1.5,
-        0.05 + Math.random() * 0.05, 0.10 + Math.random() * 0.08,
+        0.06 + Math.random() * 0.06, 0.10 + Math.random() * 0.08,
         c.r, c.g, c.b, 2.5, PGRAV * 0.3);
     }
   } catch (e) { /* optional */ }
@@ -711,6 +841,7 @@ function init(ctx) {
     buildParticles();
     buildCasings();
     buildLights();
+    buildSkids();
     subscribe(ctx);
     if (!_headless) ambient(true);   // start the low city bed (resumes on first gesture)
   } catch (e) { console.warn('[FX] init failed (non-fatal)', e); }
@@ -776,11 +907,13 @@ function update(dt, ctx) {
   try {
     if (ctx) _ctx = ctx;
     if (!dt || dt < 0) dt = 0.016; else if (dt > 0.05) dt = 0.05;
-    if (!_built) { resolveHandles(_ctx); buildParticles(); buildCasings(); buildLights(); }   // lazy attach if the scene appeared late
+    if (!_built) { resolveHandles(_ctx); buildParticles(); buildCasings(); buildLights(); buildSkids(); }   // lazy attach if the scene appeared late
     else { _camera = (_ctx && _ctx.camera) || _camera; }                       // keep the camera ref fresh
     if (_particlesOk) { stepSystem(_spark, dt); stepSystem(_smoke, dt); }
     stepCasings(dt);
     stepLights(dt);
+    stepSkids(dt);
+    updateDrift(dt);
     autoFootsteps(dt);
     applyShake(dt);
   } catch (e) { /* never throw out of the frame loop */ }
@@ -809,13 +942,14 @@ function autoFootsteps(dt) {
 function reset(ctx) {
   try {
     if (ctx) _ctx = ctx;
-    _trauma = 0; _lastFoot = null; _strideAccum = 0;
+    _trauma = 0; _lastFoot = null; _strideAccum = 0; _skidLast = null;
     for (const sys of [_spark, _smoke]) {
       if (!sys) continue;
       for (let i = 0; i < sys.cap; i++) { sys.life[i] = 0; sys.aAlpha.array[i] = 0; sys.aSize.array[i] = 0; }
       sys.aAlpha.needsUpdate = true; sys.aSize.needsUpdate = true;
     }
     if (_casings) for (const c of _casings.items) { c.life = 0; c.mesh.visible = false; }
+    if (_skids) for (const s of _skids.items) { s.life = 0; s.mat.opacity = 0; s.mesh.visible = false; }
     if (_lights) for (const e of _lights.items) { e.life = 0; e.light.intensity = 0; e.light.visible = false; }
     if (_vignette) _vignette.style.opacity = '0';
   } catch (e) { /* optional */ }

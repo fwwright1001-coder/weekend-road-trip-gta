@@ -48,6 +48,20 @@ let _nextNoteT = 0;             // ac-time the next step should fire
 let _schedSeeded = false;
 const LOOKAHEAD = 0.16;         // seconds of audio scheduled ahead of the clock
 
+// ---- reactive soundscape (engine / tire screech / sirens / music duck) -----
+// All three persistent layers hang off a shared _reactGain under the master, so
+// they obey volume + mute alongside the rest of the mix. Each is its own small
+// sub-module with an idempotent startX() (mirrors the _amb '_inited'-style guard:
+// "if (… || _engine) return") and a cheap per-frame updateX(ctx) that only writes
+// AudioParam targets on already-built nodes — NO node allocation in the hot path.
+let _reactGain = null;          // bus for engine + screech + sirens (under _master)
+let _engine = null;             // { osc1, osc2, lp, gain, sub, subG } drone nodes
+let _screech = null;            // { src, bp, gain } filtered-noise tire screech
+let _sirens = null;             // { oscHi, oscLo, lp, gain, lfo } two-tone wail bed
+let _wantedStars = 0;           // last stars from 'wanted:changed' (gates sirens)
+let _combatHeat = 0;            // 0..1 decaying envelope; gunfire/blasts bump it
+let _duckPending = 0;           // bumped combat heat to apply on the next update tick
+
 // ============================================================
 // CORE AUDIO
 // ============================================================
@@ -61,6 +75,9 @@ function audioReady() {
       _master = _ac.createGain(); _master.gain.value = _muted ? 0 : 1; _master.connect(_ac.destination);
       _musicGain = _ac.createGain(); _musicGain.gain.value = _musicVol; _musicGain.connect(_master);
       _ambGain = _ac.createGain(); _ambGain.gain.value = _ambVol; _ambGain.connect(_master);
+      // reactive layers (engine/screech/sirens) share this bus under the master,
+      // so they honour mute + master volume. Sits just under the ambient bed.
+      _reactGain = _ac.createGain(); _reactGain.gain.value = 0.9; _reactGain.connect(_master);
     }
     if (_ac.state === 'suspended') _ac.resume();   // recover from autoplay/visibility suspension
     return true;
@@ -294,6 +311,176 @@ function runScheduler() {
 }
 
 // ============================================================
+// REACTIVE SOUNDSCAPE — engine / tire screech / sirens / music duck
+// ------------------------------------------------------------
+// Four gameplay-reactive layers, all synthesised (oscillators + noise + filters),
+// all headless-safe (every node build is behind audioReady()), all idempotent
+// (startX() bails if its sub-module already exists), and all per-frame-cheap
+// (updateX() only writes AudioParam targets — no allocation in the hot loop).
+// Engine + screech + sirens share _reactGain (under the master → obey mute/vol);
+// the duck rides _musicGain.
+// ============================================================
+
+// ---- helpers shared by the reactive updaters -------------------------------
+// pull the live vehicle speed magnitude (u/s); fields may be undefined → 0.
+function vehSpeed(ctx) {
+  const v = ctx && ctx.player && ctx.player.vehicle;
+  const s = v && v.speed;
+  return Number.isFinite(s) ? Math.abs(s) : 0;
+}
+function vehSlip(ctx) {
+  const v = ctx && ctx.player && ctx.player.vehicle;
+  const s = v && v.slip;
+  return Number.isFinite(s) ? Math.abs(s) : 0;
+}
+
+// 1) ENGINE — two detuned saws + a sub through a lowpass; pitch & gain track speed
+function startEngine() {
+  try {
+    if (!audioReady() || _engine) return;
+    const now = _ac.currentTime;
+    const lp = _ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 380; lp.Q.value = 4;
+    const gain = _ac.createGain(); gain.gain.value = 0.0001;          // silent until update fades it in
+    lp.connect(gain).connect(_reactGain);
+    const osc1 = _ac.createOscillator(); osc1.type = 'sawtooth'; osc1.frequency.value = 42; osc1.connect(lp);
+    const osc2 = _ac.createOscillator(); osc2.type = 'sawtooth'; osc2.frequency.value = 42; osc2.detune.value = 11; osc2.connect(lp);
+    const sub = _ac.createOscillator(); sub.type = 'sine'; sub.frequency.value = 21;       // an octave-down rumble
+    const subG = _ac.createGain(); subG.gain.value = 0.5; sub.connect(subG).connect(lp);
+    osc1.start(now); osc2.start(now); sub.start(now);
+    _engine = { osc1, osc2, sub, subG, lp, gain };
+  } catch (e) { /* optional */ }
+}
+function stopEngine() {
+  try {
+    if (!_engine) return;
+    const e = _engine; _engine = null;
+    try { e.gain.gain.cancelScheduledValues(_ac.currentTime); e.gain.gain.setTargetAtTime(0.0001, _ac.currentTime, 0.15); } catch (er) {}
+    const stopAt = _ac.currentTime + 0.6;
+    try { e.osc1.stop(stopAt); e.osc2.stop(stopAt); e.sub.stop(stopAt); } catch (er) {}
+  } catch (e) { /* optional */ }
+}
+function updateEngine(ctx) {
+  try {
+    if (!_ac || _ac.state !== 'running') return;
+    const inVeh = !!(ctx && ctx.player && ctx.player.inVehicle);
+    if (inVeh) {
+      if (!_engine) startEngine();
+      if (!_engine) return;
+      const now = _ac.currentTime;
+      const spd = vehSpeed(ctx);                 // ~0..42 u/s
+      const norm = Math.min(1, spd / 42);
+      // idle rumble at rest → rising pitch with speed (base ~38Hz up to ~150Hz)
+      const baseHz = 38 + norm * 112;
+      const filtHz = 320 + norm * 1700;          // open the lowpass as it revs
+      const lvl = 0.14 + norm * 0.20;            // a touch louder at speed
+      _engine.osc1.frequency.setTargetAtTime(baseHz, now, 0.08);
+      _engine.osc2.frequency.setTargetAtTime(baseHz, now, 0.08);
+      _engine.sub.frequency.setTargetAtTime(baseHz * 0.5, now, 0.08);
+      _engine.lp.frequency.setTargetAtTime(filtHz, now, 0.1);
+      _engine.gain.gain.setTargetAtTime(lvl, now, 0.12);
+    } else if (_engine) {
+      stopEngine();                              // fade out + stop when out of the car
+    }
+  } catch (e) { /* never throw out of the frame loop */ }
+}
+
+// 2) TIRE SCREECH — bandpassed looped noise that fades in on high slip
+function startScreech() {
+  try {
+    if (!audioReady() || _screech) return;
+    const src = _ac.createBufferSource(); src.buffer = noiseBuffer(); src.loop = true; src.playbackRate.value = 1.4;
+    const bp = _ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2600; bp.Q.value = 6;
+    const gain = _ac.createGain(); gain.gain.value = 0.0001;
+    src.connect(bp).connect(gain).connect(_reactGain); src.start();
+    _screech = { src, bp, gain };
+  } catch (e) { /* optional */ }
+}
+function updateScreech(ctx) {
+  try {
+    if (!_ac || _ac.state !== 'running') return;
+    const inVeh = !!(ctx && ctx.player && ctx.player.inVehicle);
+    const slip = inVeh ? vehSlip(ctx) : 0;       // ~0..15; only screech while driving
+    if (slip > 5) {
+      if (!_screech) startScreech();
+      if (!_screech) return;
+      const now = _ac.currentTime;
+      const t = Math.min(1, (slip - 5) / 8);     // 5..13 maps to 0..1 intensity
+      _screech.gain.gain.setTargetAtTime(0.04 + t * 0.18, now, 0.04);
+      _screech.bp.frequency.setTargetAtTime(2200 + t * 1400, now, 0.05);
+    } else if (_screech) {
+      _screech.gain.gain.setTargetAtTime(0.0001, _ac.currentTime, 0.08);   // fade out, keep nodes (idempotent)
+    }
+  } catch (e) { /* never throw out of the frame loop */ }
+}
+
+// 3) SIRENS — a two-tone police wail bed; density/loudness scale with stars
+function startSirens() {
+  try {
+    if (!audioReady() || _sirens) return;
+    const lp = _ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2400; lp.Q.value = 0.6;
+    const gain = _ac.createGain(); gain.gain.value = 0.0001;
+    lp.connect(gain).connect(_reactGain);
+    // two detuned square tones give the classic hi/lo wail body
+    const oscHi = _ac.createOscillator(); oscHi.type = 'square'; oscHi.frequency.value = 760; oscHi.connect(lp);
+    const oscLo = _ac.createOscillator(); oscLo.type = 'square'; oscLo.frequency.value = 600; oscLo.connect(lp);
+    // an LFO sweeps both pitches up/down for the wail motion
+    const lfo = _ac.createOscillator(); lfo.type = 'triangle'; lfo.frequency.value = 0.7;
+    const lfoG = _ac.createGain(); lfoG.gain.value = 120;
+    lfo.connect(lfoG); lfoG.connect(oscHi.frequency); lfoG.connect(oscLo.frequency);
+    const now = _ac.currentTime;
+    oscHi.start(now); oscLo.start(now); lfo.start(now);
+    _sirens = { oscHi, oscLo, lp, gain, lfo, lfoG };
+  } catch (e) { /* optional */ }
+}
+function stopSirens() {
+  try {
+    if (!_sirens) return;
+    const s = _sirens; _sirens = null;
+    try { s.gain.gain.cancelScheduledValues(_ac.currentTime); s.gain.gain.setTargetAtTime(0.0001, _ac.currentTime, 0.4); } catch (er) {}
+    const stopAt = _ac.currentTime + 1.4;
+    try { s.oscHi.stop(stopAt); s.oscLo.stop(stopAt); s.lfo.stop(stopAt); } catch (er) {}
+  } catch (e) { /* optional */ }
+}
+function updateSirens() {
+  try {
+    if (!_ac || _ac.state !== 'running') return;
+    if (_wantedStars >= 2) {
+      if (!_sirens) startSirens();
+      if (!_sirens) return;
+      const now = _ac.currentTime;
+      const t = Math.min(1, (_wantedStars - 2) / 3);   // 2..5 stars → 0..1 density
+      // kept well UNDER the music: peaks ~0.10 at 5 stars
+      _sirens.gain.gain.setTargetAtTime(0.045 + t * 0.055, now, 0.5);
+      _sirens.lfo.frequency.setTargetAtTime(0.6 + t * 0.7, now, 0.5);    // more frantic with heat
+      _sirens.lfoG.gain.setTargetAtTime(110 + t * 120, now, 0.5);       // wider wail at high stars
+    } else if (_sirens) {
+      stopSirens();                                // fully out at 0/1 star
+    }
+  } catch (e) { /* never throw out of the frame loop */ }
+}
+
+// 4) MUSIC DUCK — gunfire/explosions bump a decaying heat envelope; while hot we
+// pull _musicGain down ~6 dB and smoothly restore (~2s) once combat goes quiet.
+const DUCK_DB = 0.5;            // ~ -6 dB target multiplier on the music gain
+function bumpCombatHeat(amount) { _duckPending = Math.min(1, _duckPending + amount); }
+function updateDuck(dt) {
+  try {
+    if (!_ac || !_musicGain) return;
+    if (_duckPending > 0) { _combatHeat = Math.min(1, _combatHeat + _duckPending); _duckPending = 0; }
+    // decay heat toward 0 over ~2s of quiet (frame-rate independent)
+    if (_combatHeat > 0) {
+      _combatHeat *= Math.exp(-dt / 0.7);
+      if (_combatHeat < 0.001) _combatHeat = 0;
+    }
+    // duck = lerp from full music gain down to DUCK_DB*vol by heat
+    const target = _musicVol * (1 - (1 - DUCK_DB) * Math.min(1, _combatHeat));
+    _musicGain.gain.setTargetAtTime(target, _ac.currentTime, 0.12);
+  } catch (e) { /* never throw out of the frame loop */ }
+}
+// tear down every reactive layer (used on reset)
+function stopReactive() { stopEngine(); stopSirens(); try { if (_screech) { _screech.gain.gain.setTargetAtTime(0.0001, _ac.currentTime, 0.05); } } catch (e) {} _combatHeat = 0; _duckPending = 0; }
+
+// ============================================================
 // PUBLIC API
 // ============================================================
 function stations() { return STATIONS.map((s) => s.name); }
@@ -341,6 +528,11 @@ function init(ctx) {
       bus.on('wanted:changed', (p) => {
         try { if (p && p.level > (p.prev || 0) && _ac && _amb) _nextSiren = Math.min(_nextSiren, _ac.currentTime + 2 + Math.random() * 3); } catch (e) {}
       });
+      // reactive: track stars for the police siren bed (updateSirens reacts next frame)
+      bus.on('wanted:changed', (p) => { try { const lvl = (ctx && ctx.systems && ctx.systems.wanted && ctx.systems.wanted.api && ctx.systems.wanted.api.stars && ctx.systems.wanted.api.stars()); _wantedStars = Number.isFinite(lvl) ? lvl : ((p && p.level) || 0); } catch (e) {} });
+      // reactive: combat heat ducks the music — gunfire is a small bump, blasts bigger
+      bus.on('crime', (p) => { try { if (p && p.kind === 'gunfire') bumpCombatHeat(0.5); } catch (e) {} });
+      bus.on('fx:explosion', () => { try { bumpCombatHeat(1); } catch (e) {} });
       // weather: host (Lane C) emits 'world:weather' {kind:'clear'|'rain'|'fog'};
       // scale the wind bed + fade a light rain hiss in/out. Dormant until emitted.
       bus.on('world:weather', (p) => { try { setWeather(p && p.kind); } catch (e) {} });
@@ -357,12 +549,20 @@ function update(dt, ctx) {
       playSiren(_ac.currentTime + 0.1);
       _nextSiren = _ac.currentTime + 20 + Math.random() * 28;
     }
+    // reactive soundscape (all guarded; only touch params on built nodes)
+    updateEngine(ctx);
+    updateScreech(ctx);
+    updateSirens();
+    updateDuck(dt);
   } catch (e) { /* never throw out of the frame loop */ }
 }
 function reset(ctx) {
   try {
     _schedSeeded = false; _step = 0; _bar = 0;
     if (_ac) _nextSiren = _ac.currentTime + 12 + Math.random() * 16;
+    // drop the reactive layers + heat; they re-arm from the next update/event
+    _wantedStars = 0;
+    if (_ac) stopReactive();
   } catch (e) { /* optional */ }
 }
 

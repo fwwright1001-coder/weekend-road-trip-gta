@@ -1646,6 +1646,11 @@ function fire() {
 function killPed(p) {
   p.dead = true; p.state = 'dead'; p.t = 0;
   p.fall = (Math.random() < 0.5 ? 1 : -1);             // tip direction
+  // ragdoll-lite: record an impact direction (player/car -> ped) so the body gets
+  // flung along it for a beat instead of a stiff in-place tip-over. (True physics
+  // ragdoll needs a physics engine; this is the dependency-free version.)
+  const kx = p.pos.x - player.pos.x, kz = p.pos.z - player.pos.z, kl = Math.hypot(kx, kz) || 1;
+  p.knockX = kx / kl; p.knockZ = kz / kl; p.knockT = 0.45;
   for (const m of p.mats) { m.transparent = true; }
   kills++;
   if (OF.onKill) OF.onKill(p);
@@ -2201,6 +2206,7 @@ function updateDriving(dt) {
 
   // apply to the mesh: position, heading, body roll + lean into a slide, wheel spin + steer
   const slip = Math.max(-1, Math.min(1, vl / 10));   // -1..1 drift amount for the visual lean / counter-steer
+  v.slip = Math.abs(vl);   // raw lateral slide magnitude (~0..15) — read by gta/fx.js (skid/smoke) + gta/audio.js (screech)
   v.mesh.position.copy(v.pos);
   v.mesh.rotation.y = v.heading;
   v.mesh.rotation.z = lerpNum(v.mesh.rotation.z, -steer * steerAuth * 0.06 - slip * 0.10, 0.2);
@@ -2281,6 +2287,13 @@ function exitVehicle() {
 function updatePed(p, dt) {
   if (p.state === 'dead') {
     p.t += dt;
+    // impact fling: slide along the knock direction for the first ~0.45s of death
+    if (p.knockT > 0) {
+      const f = (p.knockT / 0.45) * 3.4 * dt;
+      p.pos.x += (p.knockX || 0) * f; p.pos.z += (p.knockZ || 0) * f;
+      resolveCollision(p.pos, PED_R);
+      p.knockT -= dt;
+    }
     // tip over in the first ~0.5s, then fade out, then respawn
     const fallAng = Math.min(1, p.t / 0.5) * (Math.PI / 2) * p.fall;
     p.mesh.rotation.z = fallAng;

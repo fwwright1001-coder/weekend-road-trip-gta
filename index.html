@@ -239,6 +239,33 @@
        gta/fx.js + gta/audio.js (Lane B). So new gta/* modules are wired by the imports —
        do NOT add per-module <script> tags here (fx.js especially: it needs the
        runtime ctx and is loaded lazily + defensively from the bridge). -->
+  <!-- ============ Fill the viewport ============
+       The frame is a fixed 16:9 stage with a fixed-px HUD/menu layer (capped at
+       960px so the overlays keep their proportions). To stop it being a "postage
+       stamp" on big displays we scale the WHOLE frame — canvas + HUD + menus, which
+       are all position:absolute children of #frame — uniformly to fit the window.
+       Layout is untouched (every overlay keeps its relative place); only #stage is
+       position:fixed, so a transform on #frame is safe. The 2D/3D renderers keep
+       drawing at their own backing resolution; this is a visual upscale to fill. -->
+  <script>
+    (function () {
+      var frame = document.getElementById('frame');
+      if (!frame) return;
+      function fit() {
+        frame.style.transform = 'none';                 // measure the unscaled (CSS-fitted) size
+        var r = frame.getBoundingClientRect();
+        if (!r.width || !r.height) return;
+        var s = Math.min((window.innerWidth - 2) / r.width, (window.innerHeight - 2) / r.height);
+        if (!isFinite(s) || s < 1) s = 1;                // CSS min() already fits small windows — never shrink further
+        frame.style.transformOrigin = 'center center';
+        frame.style.transform = 'scale(' + s.toFixed(4) + ')';
+      }
+      window.addEventListener('resize', fit, { passive: true });
+      window.addEventListener('orientationchange', fit, { passive: true });
+      fit();
+      setTimeout(fit, 60); setTimeout(fit, 300);         // re-fit after fonts/layout settle
+    })();
+  </script>
   <script src="game.js"></script>
   <script type="module" src="render3d.js"></script>
   <script type="module" src="onfoot3d.js"></script>
