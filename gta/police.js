@@ -42,6 +42,22 @@ const CRUISER_SPEED    = 14;       // m/s pursuit cruiser speed
 const CRUISER_STAR_MIN = 3;        // cruisers appear at 3+ stars
 const MAX_COPS         = 16;       // hard cap on foot cops (safety)
 const MAX_CARS         = 4;        // hard cap on cruisers (safety)
+// ---- round-3: cover / flanking / backup / factions -------------------------
+const FLANK_SPREAD     = 7;        // metres a flanking cop aims to the side of the player
+const COVER_SEARCH     = 24;       // look for cover within this radius of the cop
+const COVER_OFFSET     = 1.6;      // stand this far off a building edge when in cover
+const COVER_REEVAL     = 1.6;      // re-pick a cover spot at most this often (s)
+const COVER_CHANCE_LO  = 0.4;      // fraction of cops that use cover (low stars)
+const COVER_CHANCE_HI  = 0.7;      // ...at high stars (more tactical)
+const BACKUP_WINDOW    = 4.0;      // seconds of accelerated spawning after an officer-down / escalation
+const GANG_STAR_MIN    = 3;        // a rival gang shows up in the chaos at 3+ stars
+const GANG_MAX         = 4;        // hard cap on gang members
+const GANG_HEALTH      = 45;       // gangster hit points
+const GANG_SPEED       = 6.0;      // m/s
+const GANG_ENGAGE      = 20;       // gang opens fire within this + LOS
+const GANG_FIRE_CAD    = 1.0;      // gang shot cadence (s)
+const GANG_SHOT_DMG    = 7;        // gang bullet damage (to player or a cop)
+const GANG_SHOT_RANGE  = 30;
 
 // star -> {foot cops, cruisers} base targets (scaled by difficulty)
 const WAVE_TABLE = [
@@ -73,11 +89,16 @@ const police = {
   _cars: [],                  // active cruisers
   _copPool: null,             // mesh pool (foot cops)
   _carPool: null,             // mesh pool (cruisers)
+  _gang: [],                  // rival-faction gangsters (fight player AND cops)
+  _gangPool: null,            // mesh pool (gangsters)
   _targetFoot: 0,             // desired foot-cop population
   _targetCars: 0,             // desired cruiser population
+  _targetGang: 0,             // desired gangster population
   _stars: 0,                  // last-seen wanted level
   _rng: null,                 // sub-stream rng
   _seenThisFrame: false,
+  _backupT: 0,                // >0: accelerated spawning after officer-down / escalation
+  _flankCycle: 0,             // round-robin flank assignment (-1/0/+1)
   _built: false,
   _unsub: [],                 // bus unsubscribers
 
@@ -105,6 +126,7 @@ const police = {
     // mesh pools — reuse meshes instead of create/destroy each spawn
     this._copPool = GTA.makePool((i) => buildCop(THREE, i), root);
     this._carPool = GTA.makePool((i) => buildCruiser(THREE, i), root);
+    this._gangPool = GTA.makePool((i) => buildThug(THREE, i), root);
 
     // subscribe to wanted changes -> recompute target population
     const onWanted = (p) => {
@@ -115,6 +137,10 @@ const police = {
     // a full respawn clears the heat — clear all cops
     const onRespawn = () => { try { this.clear(); } catch (e) {} };
     this._unsub.push(ctx.bus.on('playerRespawn', onRespawn));
+
+    // a rival faction can be requested explicitly (scripted events / other systems)
+    const onFaction = (p) => { try { if (p && p.faction === 'gang') this._targetGang = GU.clamp((p.count | 0) || 1, 0, GANG_MAX); } catch (e) {} };
+    this._unsub.push(ctx.bus.on('faction:spawn', onFaction));
 
     // seed from current wanted level if the wanted system is already up
     const wapi = ctx.systems && ctx.systems.wanted && ctx.systems.wanted.api;
@@ -164,6 +190,16 @@ const police = {
       this._updateCar(car, dt, ctx, world, player, px, pz);
     }
 
+    // ---- update gangsters (rival faction — fight the player AND the cops) ----
+    for (let i = this._gang.length - 1; i >= 0; i--) {
+      const g = this._gang[i];
+      if (!g) continue;
+      if (g.dead) { this._retireGang(i); continue; }
+      this._updateGang(g, dt, ctx, world, player, px, pz);
+    }
+
+    if (this._backupT > 0) this._backupT = Math.max(0, this._backupT - dt);
+
     // tell the wanted system whether the player is currently observed
     const wapi = ctx.systems && ctx.systems.wanted && ctx.systems.wanted.api;
     if (wapi && typeof wapi.setSeen === 'function') {
@@ -189,6 +225,7 @@ const police = {
 
   _setStars(stars) {
     stars = GU.clamp(stars | 0, 0, 5);
+    const prev = this._stars;
     this._stars = stars;
     const ctx = this._ctx;
     const diff = (ctx && ctx.config && typeof ctx.config.difficulty === 'number')
@@ -197,18 +234,31 @@ const police = {
     // scale foot cops by difficulty (cars scale gently, capped)
     this._targetFoot = Math.min(MAX_COPS, Math.round(row.foot * GU.clamp(diff, 0.5, 2)));
     this._targetCars = Math.min(MAX_CARS, Math.round(row.cars * GU.clamp(diff, 0.5, 1.5)));
-    if (stars === 0) { this._targetFoot = 0; this._targetCars = 0; this.clear(); }
+    // a rival gang turns up in the chaos at high heat (one more per star over the floor)
+    this._targetGang = stars >= GANG_STAR_MIN ? GU.clamp(stars - GANG_STAR_MIN + 1, 0, GANG_MAX) : 0;
+    if (stars === 0) { this._targetFoot = 0; this._targetCars = 0; this._targetGang = 0; this.clear(); }
+    else if (stars > prev) this._callBackup('escalation');   // heating up → call backup
+  },
+
+  // open a window of accelerated spawning + announce the incoming wave. The
+  // surge lasts longer when the wanted system reports a hotter situation.
+  _callBackup(reason) {
+    const ctx = this._ctx;
+    const w = ctx && ctx.systems && ctx.systems.wanted && ctx.systems.wanted.api;
+    const esc = (w && typeof w.escalation === 'function') ? w.escalation() : 0;
+    this._backupT = BACKUP_WINDOW * (1 + esc);
+    if (ctx && ctx.bus) ctx.bus.emit('police:backup', { stars: this._stars, reason });
   },
 
   // gradually spawn toward target / despawn the excess
   _maintainPopulation(ctx, world, px, pz) {
-    // FOOT COPS
-    if (this._cops.length < this._targetFoot) {
-      // spawn at most one per frame to avoid a hitch
+    // FOOT COPS — a backup wave spawns several per frame so they converge fast
+    const burst = this._backupT > 0 ? 3 : 1;
+    for (let n = 0; n < burst && this._cops.length < this._targetFoot; n++) {
       this._spawnCop(ctx, world, px, pz);
-    } else if (this._cops.length > this._targetFoot) {
-      // remove the cop furthest from the player (least relevant)
-      this._despawnFarthestCop(px, pz);
+    }
+    if (this._cops.length > this._targetFoot) {
+      this._despawnFarthestCop(px, pz);   // remove the cop furthest from the player
     }
 
     // CRUISERS
@@ -216,6 +266,13 @@ const police = {
       this._spawnCar(ctx, world, px, pz);
     } else if (this._cars.length > this._targetCars) {
       this._despawnFarthestCar(px, pz);
+    }
+
+    // GANGSTERS (rival faction)
+    if (this._gang.length < this._targetGang) {
+      this._spawnGang(ctx, world, px, pz);
+    } else if (this._gang.length > this._targetGang) {
+      this._despawnFarthestGang(px, pz);
     }
   },
 
@@ -254,6 +311,7 @@ const police = {
     mesh.position.set(sx, 0, sz);
     if (mesh.userData) { mesh.userData.phase = rng() * Math.PI * 2; this._setMuzzleFlash(mesh, false); }
 
+    const highStars = this._stars >= 4;
     const cop = {
       mesh,
       pos: mesh.position,                  // alias: hittable uses this Vector3
@@ -261,11 +319,16 @@ const police = {
       maxHealth: COP_HEALTH,
       dead: false,
       state: 'seek',
+      faction: 'police',
       fireT: GU.rand(rng, 0.2, FIRE_CADENCE), // stagger first shots
       arrestT: 0,
       flashT: 0,
       facing: 0,
       target: null,
+      // round-3 tactics: a flank lane (spread around the player) + cover use
+      flank: [-1, 0, 1][(this._flankCycle++) % 3],
+      usesCover: rng() < (highStars ? COVER_CHANCE_HI : COVER_CHANCE_LO),
+      cover: null, coverT: 0, atCover: false,
     };
 
     // shared hittable registry entry (combat.js raycasts these)
@@ -319,15 +382,18 @@ const police = {
       let pos;
       if (hitPos && hitPos.x !== undefined) pos = _tmpHit.set(hitPos.x, hitPos.y != null ? hitPos.y : cop.pos.y, hitPos.z);
       else pos = _tmpHit.set(cop.pos.x, cop.pos.y, cop.pos.z);
+      const byPlayer = srcKind !== 'gang';   // a gang-killed cop isn't the player's crime
       if (ctx && ctx.bus) {
-        ctx.bus.emit('entityKilled', { entity: cop, kind: 'cop', pos: pos.clone(), byPlayer: true });
-        // killing a cop is a big-heat crime
-        ctx.bus.emit('crime', { kind: 'copKilled', pos: pos.clone(), severity: 5, source: 'player' });
+        ctx.bus.emit('entityKilled', { entity: cop, kind: 'cop', pos: pos.clone(), byPlayer });
+        // killing a cop is a big-heat crime — but only when the PLAYER did it
+        if (byPlayer) ctx.bus.emit('crime', { kind: 'copKilled', pos: pos.clone(), severity: 5, source: 'player' });
         // chance to drop ammo
         if (GU.chance(this._rng, 0.5)) {
           ctx.bus.emit('spawnPickup', { kind: 'ammo', value: 1, pos: pos.clone() });
         }
       }
+      // officer down → call in a backup wave (accelerated spawning + heads-up)
+      this._callBackup('officerDown');
     }
   },
 
@@ -341,36 +407,47 @@ const police = {
     const engageRange = highStars ? ENGAGE_RANGE_HI : ENGAGE_RANGE;
     const speed = highStars ? COP_SPEED_HI : COP_SPEED;
 
-    // visibility: keep the player "seen" if close + rough LOS
+    // visibility vs the player keeps the wanted level "seen"
     const playerOnFoot = player && !player.inVehicle;
-    let hasLOS = false;
+    let hasLOSplayer = false;
     if (distToPlayer <= SEEN_RANGE) {
-      hasLOS = this._lineOfSight(world, pos.x, pos.z, px, pz);
-      if (hasLOS) this._seenThisFrame = true;
+      hasLOSplayer = this._lineOfSight(world, pos.x, pos.z, px, pz);
+      if (hasLOSplayer) this._seenThisFrame = true;
     }
 
+    // ---- pick a target: the player, or a nearer gangster (faction fight) ----
+    let tx = px, tz = pz, gangTgt = null;
+    const gang = this._nearestLiving(this._gang, pos.x, pos.z);
+    if (gang) {
+      const dg = GU.dist2D(pos.x, pos.z, gang.pos.x, gang.pos.z);
+      if (dg < engageRange && dg < distToPlayer) { tx = gang.pos.x; tz = gang.pos.z; gangTgt = gang; }
+    }
+    const distTgt = gangTgt ? GU.dist2D(pos.x, pos.z, tx, tz) : distToPlayer;
+    const hasLOStgt = gangTgt ? this._lineOfSight(world, pos.x, pos.z, tx, tz) : hasLOSplayer;
+
     // ---- choose state ----
-    if (distToPlayer <= ARREST_RANGE && playerOnFoot &&
+    if (!gangTgt && distToPlayer <= ARREST_RANGE && playerOnFoot &&
         this._stars > 0 && this._stars <= ARREST_MAX_STARS) {
       cop.state = 'arrest';
-    } else if (distToPlayer <= engageRange && hasLOS) {
-      cop.state = 'engage';
+    } else if (distTgt <= engageRange && hasLOStgt) {
+      cop.state = cop.usesCover ? 'cover' : 'engage';
     } else {
       cop.state = 'seek';
     }
 
     // ---- behaviour ----
     if (cop.state === 'seek') {
-      this._steerToward(cop, dt, speed, px, pz, world);
+      this._approach(cop, dt, speed, tx, tz, world);    // flank-spread approach
+      cop.arrestT = 0; cop.atCover = false; cop.cover = null;
+    } else if (cop.state === 'cover') {
+      this._coverBehaviour(cop, dt, ctx, world, tx, tz, distTgt, hasLOStgt, speed, player, gangTgt);
       cop.arrestT = 0;
     } else if (cop.state === 'engage') {
-      // close a little if just outside arrest band, otherwise hold + fire
-      if (distToPlayer > engageRange * 0.55) {
-        this._steerToward(cop, dt, speed * 0.85, px, pz, world);
-      }
-      this._faceTarget(cop, px, pz, dt);
-      this._tryFire(cop, dt, ctx, distToPlayer, hasLOS, player, px, pz);
-      cop.arrestT = 0;
+      if (distTgt > engageRange * 0.55) this._approach(cop, dt, speed * 0.85, tx, tz, world);
+      else cop.moving = false;
+      this._faceTarget(cop, tx, tz, dt);
+      this._fire(cop, dt, ctx, distTgt, hasLOStgt, player, tx, tz, gangTgt);
+      cop.arrestT = 0; cop.atCover = false; cop.cover = null;
     } else if (cop.state === 'arrest') {
       this._faceTarget(cop, px, pz, dt);
       // player must be roughly still to be cuffed
@@ -433,43 +510,231 @@ const police = {
     cop.moving = false;
   },
 
-  // fire a pistol-like shot at the player on a cadence (a 'damage' request)
-  _tryFire(cop, dt, ctx, distToPlayer, hasLOS, player, px, pz) {
+  // a flank-spread approach: steer at a point offset to the side of the target so
+  // a squad surrounds rather than stacks (the offset shrinks as the cop closes in)
+  _approach(cop, dt, speed, tx, tz, world) {
+    const pos = cop.pos;
+    let dx = tx - pos.x, dz = tz - pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const perpX = -dz / d, perpZ = dx / d;
+    const spread = (cop.flank || 0) * FLANK_SPREAD * GU.clamp(d / 18, 0, 1);
+    this._steerToward(cop, dt, speed, tx + perpX * spread, tz + perpZ * spread, world);
+  },
+
+  // fire a pistol-like shot at the current target (the player OR a rival gangster)
+  _fire(cop, dt, ctx, dist, hasLOS, player, tx, tz, gangTgt) {
     cop.fireT -= dt;
     const cadence = this._stars >= 4 ? FIRE_CADENCE_HI : FIRE_CADENCE;
     if (cop.fireT > 0) return;
     cop.fireT = cadence * GU.rand(this._rng, 0.85, 1.2);
+    if (!hasLOS || dist > SHOT_RANGE) return;
 
-    if (!hasLOS) return;
-    if (distToPlayer > SHOT_RANGE) return;
-
-    // muzzle flash on the cop mesh
     this._setMuzzleFlash(cop.mesh, true);
 
-    // damage falls off slightly with distance; high stars hit a touch harder
     const diff = (ctx.config && typeof ctx.config.difficulty === 'number') ? ctx.config.difficulty : 1;
-    const falloff = GU.clamp(1 - (distToPlayer / SHOT_RANGE) * 0.45, 0.4, 1);
+    const falloff = GU.clamp(1 - (dist / SHOT_RANGE) * 0.45, 0.4, 1);
     let amount = GU.rand(this._rng, SHOT_DMG_MIN, SHOT_DMG_MAX) * falloff;
     if (this._stars >= 4) amount *= 1.2;
     amount *= GU.clamp(diff, 0.5, 2);
-    // miss chance increases with distance (so they don't laser you)
-    const hitChance = GU.clamp(1 - (distToPlayer / SHOT_RANGE) * 0.6, 0.35, 0.95);
-    if (this._rng() > hitChance) {
-      // a miss still makes noise / shake but no damage request
-      if (ctx.bus) ctx.bus.emit('shake', { amount: 0.5 });
-      return;
+    const hitChance = GU.clamp(1 - (dist / SHOT_RANGE) * 0.6, 0.35, 0.95);
+    if (this._rng() > hitChance) { if (ctx.bus) ctx.bus.emit('shake', { amount: 0.5 }); return; }
+
+    if (gangTgt) {
+      // cop vs gangster — deal damage directly (no player-crime, no player-shake)
+      this._damageGang(gangTgt, Math.round(amount), ctx);
+      if (ctx.bus) ctx.bus.emit('faction:fight', { a: 'police', b: 'gang', pos: { x: tx, y: 1, z: tz } });
+    } else if (ctx.bus) {
+      const hp = player.pos ? _tmpA.copy(player.pos) : _tmpA.set(tx, 1, tz);
+      ctx.bus.emit('damage', { target: 'player', amount: Math.round(amount), kind: 'bullet', pos: hp.clone(), source: 'cop' });
+      ctx.bus.emit('shake', { amount: 0.9 });
+    }
+  },
+
+  // ============================================================
+  // COVER — take up a position with a building between the cop and the target,
+  // then peek-fire from it (round-3 tactical behaviour)
+  // ============================================================
+  _coverBehaviour(cop, dt, ctx, world, tx, tz, dist, hasLOS, speed, player, gangTgt) {
+    cop.coverT -= dt;
+    if (!cop.cover || cop.coverT <= 0) { cop.cover = this._findCover(cop, tx, tz, world); cop.coverT = COVER_REEVAL; }
+    const cover = cop.cover;
+    if (cover) {
+      const dc = GU.dist2D(cop.pos.x, cop.pos.z, cover.x, cover.z);
+      if (dc > 1.3) {                       // still moving to cover
+        this._steerToward(cop, dt, speed, cover.x, cover.z, world);
+        cop.atCover = false;
+      } else {                              // at cover — face out + peek-fire
+        cop.atCover = true; cop.moving = false;
+        this._faceTarget(cop, tx, tz, dt);
+        this._fire(cop, dt, ctx, dist, hasLOS, player, tx, tz, gangTgt);
+      }
+    } else {                                // no cover nearby — behave like an engager
+      if (dist > 6) this._approach(cop, dt, speed * 0.85, tx, tz, world); else cop.moving = false;
+      this._faceTarget(cop, tx, tz, dt);
+      this._fire(cop, dt, ctx, dist, hasLOS, player, tx, tz, gangTgt);
+    }
+  },
+
+  // building AABBs from the world shim (C's geometry-matched colliders)
+  _aabbs() {
+    const ctx = this._ctx;
+    const w = ctx && ctx.systems && ctx.systems.world;
+    return (w && w.aabbs) || null;
+  },
+
+  // find a spot just behind a nearby building, relative to the target, that the
+  // building actually occludes (so the cop is shielded). Returns {x,z} or null.
+  _findCover(cop, tx, tz, world) {
+    const aabbs = this._aabbs();
+    if (!aabbs || !aabbs.length) return null;
+    const cx = cop.pos.x, cz = cop.pos.z;
+    let best = null, bestD = Infinity;
+    for (const b of aabbs) {
+      const bcx = (b.minX + b.maxX) * 0.5, bcz = (b.minZ + b.maxZ) * 0.5;
+      if (GU.dist2D(bcx, bcz, cx, cz) > COVER_SEARCH) continue;
+      // a point just past the face of the box on the side AWAY from the target
+      let dirx = bcx - tx, dirz = bcz - tz;
+      const dl = Math.hypot(dirx, dirz) || 1; dirx /= dl; dirz /= dl;
+      const hx = (b.maxX - b.minX) * 0.5 + COVER_OFFSET, hz = (b.maxZ - b.minZ) * 0.5 + COVER_OFFSET;
+      const pX = bcx + dirx * hx, pZ = bcz + dirz * hz;
+      // only counts as cover if the building blocks the target → point line
+      if (this._lineOfSight(world, tx, tz, pX, pZ)) continue;
+      const dd = GU.dist2D(pX, pZ, cx, cz);
+      if (dd < bestD) { bestD = dd; best = { x: pX, z: pZ }; }
+    }
+    return best;
+  },
+
+  _nearestLiving(list, x, z) {
+    let best = null, bd = Infinity;
+    for (const e of list) {
+      if (!e || e.dead || !e.pos) continue;
+      const d = GU.dist2D(e.pos.x, e.pos.z, x, z);
+      if (d < bd) { bd = d; best = e; }
+    }
+    return best;
+  },
+
+  // ============================================================
+  // RIVAL GANG FACTION — fights the player AND the cops
+  // ============================================================
+  _spawnGang(ctx, world, px, pz) {
+    if (this._gang.length >= GANG_MAX) return;
+    const rng = this._rng;
+    let sx = px, sz = pz, found = false;
+    for (let a = 0; a < 8; a++) {
+      if (world && typeof world.randomRoadSpawn === 'function') { world.randomRoadSpawn(rng, _spawn); sx = _spawn.x; sz = _spawn.z; }
+      else { const ang = rng() * Math.PI * 2, r = GU.rand(rng, SPAWN_MIN_DIST, SPAWN_MAX_DIST); sx = px + Math.cos(ang) * r; sz = pz + Math.sin(ang) * r; }
+      const d = GU.dist2D(sx, sz, px, pz);
+      if (d >= SPAWN_MIN_DIST && d <= SPAWN_MAX_DIST) { found = true; break; }
+    }
+    if (!found) { const ang = rng() * Math.PI * 2; sx = px + Math.cos(ang) * (SPAWN_MIN_DIST + 8); sz = pz + Math.sin(ang) * (SPAWN_MIN_DIST + 8); }
+
+    const mesh = this._gangPool.get();
+    mesh.visible = true; mesh.position.set(sx, 0, sz);
+    if (mesh.userData) this._setMuzzleFlash(mesh, false);
+
+    const g = {
+      mesh, pos: mesh.position, health: GANG_HEALTH, maxHealth: GANG_HEALTH, dead: false,
+      faction: 'gang', state: 'seek', fireT: GU.rand(rng, 0.2, GANG_FIRE_CAD), flashT: 0, facing: 0, moving: false,
+    };
+    const entry = {
+      pos: mesh.position, height: COP_HEIGHT, radius: COP_RADIUS, kind: 'gang', dead: false,
+      onHit: (amount, srcKind, hitPos) => this._onGangHit(g, entry, amount, srcKind, hitPos),
+    };
+    g.entry = entry;
+    if (Array.isArray(ctx.targets)) ctx.targets.push(entry);
+    this._gang.push(g);
+  },
+
+  _retireGang(i) {
+    const g = this._gang[i];
+    if (!g) return;
+    this._removeTarget(g.entry);
+    if (g.mesh) { g.mesh.visible = false; this._setMuzzleFlash(g.mesh, false); }
+    this._gang.splice(i, 1);
+  },
+
+  _despawnFarthestGang(px, pz) {
+    let worst = -1, worstD = -1;
+    for (let i = 0; i < this._gang.length; i++) {
+      const d = GU.dist2D(this._gang[i].pos.x, this._gang[i].pos.z, px, pz);
+      if (d > worstD) { worstD = d; worst = i; }
+    }
+    if (worst >= 0) this._retireGang(worst);
+  },
+
+  // the player (or a cop) shot a gangster
+  _onGangHit(g, entry, amount, srcKind, hitPos) {
+    if (g.dead) return;
+    g.health -= (amount || 0);
+    g.flashT = 0.08;
+    if (g.health <= 0) {
+      g.dead = true; entry.dead = true;
+      const ctx = this._ctx;
+      if (ctx && ctx.bus) {
+        const pos = (hitPos && hitPos.x !== undefined) ? _tmpHit.set(hitPos.x, hitPos.y != null ? hitPos.y : g.pos.y, hitPos.z) : _tmpHit.set(g.pos.x, g.pos.y, g.pos.z);
+        ctx.bus.emit('entityKilled', { entity: g, kind: 'gang', pos: pos.clone(), byPlayer: srcKind !== 'cop' });
+      }
+    }
+  },
+
+  // a cop dealt damage to a gangster directly (faction fight, not a player raycast)
+  _damageGang(g, amount, ctx) {
+    if (!g || g.dead) return;
+    g.health -= amount; g.flashT = 0.08;
+    if (g.health <= 0) {
+      g.dead = true; if (g.entry) g.entry.dead = true;
+      if (ctx && ctx.bus) ctx.bus.emit('entityKilled', { entity: g, kind: 'gang', pos: _tmpHit.set(g.pos.x, g.pos.y, g.pos.z).clone(), byPlayer: false });
+    }
+  },
+
+  _updateGang(g, dt, ctx, world, player, px, pz) {
+    const pos = g.pos;
+    // nearest hostile = the player, or the nearest cop (whichever is closer)
+    const cop = this._nearestLiving(this._cops, pos.x, pos.z);
+    const dP = GU.dist2D(pos.x, pos.z, px, pz);
+    let tx = px, tz = pz, copTgt = null;
+    if (cop) {
+      const dC = GU.dist2D(pos.x, pos.z, cop.pos.x, cop.pos.z);
+      if (dC < dP) { tx = cop.pos.x; tz = cop.pos.z; copTgt = cop; }
+    }
+    const dist = GU.dist2D(pos.x, pos.z, tx, tz);
+    const hasLOS = this._lineOfSight(world, pos.x, pos.z, tx, tz);
+    if (dist <= GANG_ENGAGE && hasLOS) {
+      g.state = 'engage';
+      this._faceTarget(g, tx, tz, dt);
+      this._gangFire(g, dt, ctx, dist, hasLOS, player, tx, tz, copTgt);
+    } else {
+      g.state = 'seek';
+      this._steerToward(g, dt, GANG_SPEED, tx, tz, world);
     }
 
-    if (ctx.bus) {
-      const hp = player.pos ? _tmpA.copy(player.pos) : _tmpA.set(px, 1, pz);
-      ctx.bus.emit('damage', {
-        target: 'player',
-        amount: Math.round(amount),
-        kind: 'bullet',
-        pos: hp.clone(),
-        source: 'cop',
-      });
-      ctx.bus.emit('shake', { amount: 0.9 });
+    if (g.flashT > 0) g.flashT = Math.max(0, g.flashT - dt);
+    if (g.mesh && g.mesh.userData) {
+      this._tintCop(g.mesh, g.flashT > 0);
+      if (g.mesh.userData.muzzleFlashT > 0) { g.mesh.userData.muzzleFlashT -= dt; if (g.mesh.userData.muzzleFlashT <= 0) this._setMuzzleFlash(g.mesh, false); }
+    }
+    if (dP > DESPAWN_DIST) g.dead = true;
+    this._syncCopMesh(g, dt, GANG_SPEED);   // shares the cop rig (same userData keys)
+  },
+
+  _gangFire(g, dt, ctx, dist, hasLOS, player, tx, tz, copTgt) {
+    g.fireT -= dt;
+    if (g.fireT > 0) return;
+    g.fireT = GANG_FIRE_CAD * GU.rand(this._rng, 0.8, 1.25);
+    if (!hasLOS || dist > GANG_SHOT_RANGE) return;
+    this._setMuzzleFlash(g.mesh, true);
+    const hitChance = GU.clamp(1 - (dist / GANG_SHOT_RANGE) * 0.6, 0.3, 0.9);
+    if (this._rng() > hitChance) return;
+    const amount = Math.round(GANG_SHOT_DMG * GU.rand(this._rng, 0.7, 1.2));
+    if (copTgt && copTgt.entry && copTgt.entry.onHit) {
+      copTgt.entry.onHit(amount, 'gang', { x: copTgt.pos.x, y: copTgt.pos.y, z: copTgt.pos.z });   // gang vs cop
+      if (ctx.bus) ctx.bus.emit('faction:fight', { a: 'gang', b: 'police', pos: { x: tx, y: 1, z: tz } });
+    } else if (ctx.bus) {
+      const hp = player.pos ? _tmpA.copy(player.pos) : _tmpA.set(tx, 1, tz);
+      ctx.bus.emit('damage', { target: 'player', amount, kind: 'bullet', pos: hp.clone(), source: 'gang' });
+      ctx.bus.emit('shake', { amount: 0.7 });
     }
   },
 
@@ -661,8 +926,8 @@ const police = {
     if (!m) return;
     m.position.copy(cop.pos);
     m.rotation.y = cop.facing;
-    // raise the gun arm when engaging/arresting (compute fresh, this frame)
-    const raise = (cop.state === 'engage' || cop.state === 'arrest');
+    // raise the gun arm when engaging/arresting/peeking from cover (fresh this frame)
+    const raise = (cop.state === 'engage' || cop.state === 'arrest' || (cop.state === 'cover' && cop.atCover));
     cop.armRaised = raise;
     // walk animation
     const u = m.userData;
@@ -757,6 +1022,11 @@ const police = {
 
     // number of active cruisers (handy for HUD / debug)
     carCount() { return police._cars.length; },
+
+    // round-3 diagnostics (HUD / tests)
+    gangCount() { return police._gang.length; },
+    coverCount() { return police._cops.filter((c) => c.atCover).length; },
+    backupActive() { return police._backupT > 0; },
   },
 
   // ============================================================
@@ -765,8 +1035,11 @@ const police = {
   clear() {
     for (let i = this._cops.length - 1; i >= 0; i--) this._retireCop(i);
     for (let i = this._cars.length - 1; i >= 0; i--) this._retireCar(i);
+    for (let i = this._gang.length - 1; i >= 0; i--) this._retireGang(i);
     this._cops.length = 0;
     this._cars.length = 0;
+    this._gang.length = 0;
+    this._backupT = 0;
   },
 };
 
@@ -838,6 +1111,59 @@ function buildCop(THREE, idx) {
   g.userData.phase = 0;
 
   g.visible = false;     // pooled; shown on spawn
+  return g;
+}
+
+// a rival gangster — same proportions + userData rig as a cop (so it reuses the
+// shared mesh-sync/flash/tint), but street colours: dark hoodie, no cap/badge.
+function buildThug(THREE, idx) {
+  const g = new THREE.Group();
+  g.name = 'thug';
+
+  const hoodie = [0x3a2230, 0x223a2a, 0x2a2a32, 0x402a1c][idx % 4];   // varied dark tops
+  const pants  = 0x222428;
+  const skin   = [0xcf9c70, 0x9c6b43, 0xe8c9a0][idx % 3];
+  const hair   = 0x161412;
+
+  const mkMat = (col, rough = 0.9) => new THREE.MeshStandardMaterial({ color: col, roughness: rough });
+  const mk = (geo, mat) => { const m = new THREE.Mesh(geo, mat); m.castShadow = true; m.receiveShadow = true; return m; };
+
+  const pantsMat = mkMat(pants);
+  const topMat   = mkMat(hoodie);
+  const skinMat  = mkMat(skin);
+  const hairMat  = mkMat(hair, 0.7);
+
+  const legL = mk(new THREE.BoxGeometry(0.26, 0.8, 0.28), pantsMat); legL.position.set(-0.16, 0.4, 0);
+  const legR = mk(new THREE.BoxGeometry(0.26, 0.8, 0.28), pantsMat); legR.position.set(0.16, 0.4, 0);
+  const torso = mk(new THREE.BoxGeometry(0.62, 0.74, 0.36), topMat); torso.position.set(0, 1.16, 0);
+  const armL = mk(new THREE.BoxGeometry(0.18, 0.66, 0.2), topMat); armL.position.set(-0.42, 1.18, 0);
+  const armR = mk(new THREE.BoxGeometry(0.18, 0.66, 0.2), topMat); armR.position.set(0.42, 1.18, 0);
+  const head = mk(new THREE.BoxGeometry(0.34, 0.36, 0.34), skinMat); head.position.set(0, 1.72, 0);
+  const hairMesh = mk(new THREE.BoxGeometry(0.36, 0.12, 0.36), hairMat); hairMesh.position.set(0, 1.9, 0);
+
+  // a small SMG-ish gun in the right hand
+  const gunMat = new THREE.MeshStandardMaterial({ color: 0x101012, roughness: 0.5, metalness: 0.3 });
+  const gun = mk(new THREE.BoxGeometry(0.1, 0.14, 0.4), gunMat);
+  gun.position.set(0, -0.2, 0.2); gun.rotation.x = 0.18;
+  armR.add(gun);
+
+  const flashMat = new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.95 });
+  const flash = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 6), flashMat);
+  flash.position.set(0, -0.2, 0.44); flash.visible = false;
+  armR.add(flash);
+
+  const muzzle = new THREE.Object3D(); muzzle.position.set(0.42, 1.0, 0.5); g.add(muzzle);
+  g.add(legL, legR, torso, armL, armR, head, hairMesh);
+
+  g.userData.legL = legL; g.userData.legR = legR;
+  g.userData.armL = armL; g.userData.armR = armR;
+  g.userData.muzzle = muzzle;
+  g.userData.flash = flash;
+  g.userData.torsoMat = topMat;
+  g.userData.muzzleFlashT = 0;
+  g.userData.phase = 0;
+
+  g.visible = false;
   return g;
 }
 

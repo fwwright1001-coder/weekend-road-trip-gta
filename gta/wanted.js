@@ -283,6 +283,14 @@ const wanted = {
     // raw continuous heat (handy for debugging / other systems that want it).
     heatRaw() { return wanted.heat; },
 
+    // overall police-aggression intensity 0..1 (blends stars + heat). police.js
+    // keys backup-wave length off this so a hotter situation surges harder.
+    escalation() {
+      const sFrac = (wanted.stars | 0) / MAX_STARS;
+      const hFrac = GU.clamp(wanted.heat / HEAT_CAP, 0, 1);
+      return GU.clamp(sFrac * 0.6 + hFrac * 0.4, 0, 1);
+    },
+
     // add wanted heat. Accepts either a crime KIND string (uses its weight) or a
     // raw NUMBER (added directly). Routes through the same path as bus 'crime'
     // so toasts/wanted:changed fire identically.
