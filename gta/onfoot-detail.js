@@ -149,6 +149,7 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
   M.flower    = new THREE.MeshStandardMaterial({ color: 0xd8607a, roughness: 0.85, flatShading: true });
   M.paintWhite= new THREE.MeshBasicMaterial({ color: 0xeef0f0 });   // crosswalk / stop bars
   M.paintYellow= new THREE.MeshBasicMaterial({ color: 0xffea88 });  // centre-line dashes
+  M.manhole   = new THREE.MeshStandardMaterial({ color: 0x2e3033, roughness: 0.7, metalness: 0.5 }); // cast-iron cover
   // --- extras for the new prop types (dumpsters, parked cars, signage, fences…) ---
   M.dumpster  = new THREE.MeshStandardMaterial({ color: 0x2f5e44, roughness: 0.7, metalness: 0.25 });
   M.dumpsterLid=new THREE.MeshStandardMaterial({ color: 0x274c39, roughness: 0.7, metalness: 0.2 });
@@ -200,6 +201,7 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
   G.bannerGeo= new THREE.BoxGeometry(0.04, 0.5, 0.7);
   G.stripe   = new THREE.PlaneGeometry(0.6, 2.6);                     // crosswalk plank
   G.dash     = new THREE.PlaneGeometry(0.3, 2.2);                     // lane dash
+  G.manhole  = new THREE.CylinderGeometry(0.42, 0.42, 0.05, 16);      // cast-iron cover disc (lies flat as-is)
   G.flowerHead = new THREE.SphereGeometry(0.09, 6, 5);
   // --- extras: shared geometries for the new prop types ---
   G.dumpBody = new THREE.BoxGeometry(1.7, 0.95, 1.0);
@@ -745,6 +747,26 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
   // centre-line dashes down each street line, across the map (skipping plaza/excludes)
   for (const lx of uniq) addLaneDashes(lx, 'z', -(BOUND - 4), BOUND - 4);
   for (const lz of uniq) addLaneDashes(lz, 'x', -(BOUND - 4), BOUND - 4);
+
+  // ---- 5) MANHOLE COVERS — cast-iron discs dotted along the streets and at the
+  // kerb. Flat, decorative road furniture (no collider, not budget-counted); they
+  // share one geo+mat so the batcher folds them into a single draw. The unit
+  // cylinder already lies flat, so no rotation is needed.
+  {
+    let n = 0;
+    for (const lx of uniq) {
+      for (let z = -(BOUND - 8); z <= BOUND - 8; z += rand(13, 20)) {
+        if (n >= 26) break;
+        if (!chance(0.55)) continue;
+        const x = lx + rand(-2.5, 2.5);                       // wander a little off the centre-line
+        if (Math.hypot(x, z) < PLAZA_R + 1) continue;
+        if (inExcluded(x, z, 1)) continue;
+        const cover = new THREE.Mesh(G.manhole, M.manhole);
+        cover.position.set(x, 0.03, z); cover.receiveShadow = true;
+        root.add(cover); n++;
+      }
+    }
+  }
 
   // ============================================================
   // OPTIMIZE — collapse the hundreds of static prop/paint meshes into a handful
