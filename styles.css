@@ -775,3 +775,63 @@ body.gta-fp #gta-hud::before {
 body.gta-fp #gta-crosshair { width: 16px; height: 16px; margin: -8px 0 0 -8px; }
 body.gta-fp #gta-crosshair::after { opacity: 0.3; }
 body.gta-fp #foot-crosshair { transform: scale(0.7); opacity: 0.85; }
+
+/* ============================================================
+   Pause / settings overlay (Lane B). Built by gta/hud-radar.js, opened on Esc
+   (pointer-unlock). Pointer-events on so its controls are usable while the rest
+   of the HUD stays click-through. Matches the gold-on-dark mono HUD aesthetic.
+   ============================================================ */
+#gta-menu {
+  position: absolute; inset: 0; z-index: 40;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(6, 8, 12, 0.62); backdrop-filter: blur(3px);
+  pointer-events: auto;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  animation: gtaMenuIn .16s ease-out;
+}
+#gta-menu.hidden { display: none; }
+@keyframes gtaMenuIn { from { opacity: 0; } to { opacity: 1; } }
+.gta-menu-panel {
+  width: 340px; max-width: 86%;
+  background: linear-gradient(180deg, rgba(20, 24, 32, 0.96), rgba(12, 15, 21, 0.96));
+  border: 1px solid rgba(245, 215, 110, 0.35); border-radius: 12px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  padding: 18px 20px 16px; color: #e8eaef;
+}
+.gta-menu-panel h2 {
+  margin: 0 0 14px; text-align: center; letter-spacing: 5px;
+  font-size: 20px; color: #f5d76e; text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+}
+.gta-menu-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 7px 0; font-size: 13px; color: #cdd3dc;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.gta-menu-row label, .gta-menu-row > span { flex: 0 0 auto; }
+.gta-menu-row input[type="range"] { flex: 1 1 auto; max-width: 160px; accent-color: #f5d76e; cursor: pointer; }
+.gta-menu-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #f5d76e; cursor: pointer; }
+.gta-menu-radio {
+  background: rgba(245, 215, 110, 0.12); border: 1px solid rgba(245, 215, 110, 0.4);
+  color: #f5d76e; border-radius: 6px; padding: 4px 12px; font: inherit; font-size: 12px;
+  letter-spacing: 1px; cursor: pointer; transition: background .15s;
+}
+.gta-menu-radio:hover { background: rgba(245, 215, 110, 0.22); }
+.gta-menu-actions { display: flex; gap: 10px; margin-top: 16px; }
+.gta-menu-btn {
+  flex: 1; padding: 10px; border-radius: 7px; font: inherit; font-size: 13px;
+  letter-spacing: 2px; cursor: pointer; color: #e8eaef;
+  background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.14);
+  transition: background .15s, transform .08s;
+}
+.gta-menu-btn:hover { background: rgba(255, 255, 255, 0.12); }
+.gta-menu-btn:active { transform: translateY(1px); }
+.gta-menu-btn.primary {
+  background: linear-gradient(180deg, #f5d76e, #d8b23e); color: #1a1a2e; font-weight: 700;
+  border-color: #f5d76e;
+}
+.gta-menu-btn.primary:hover { background: linear-gradient(180deg, #ffe488, #e6c150); }
+.gta-menu-hint { margin: 12px 0 0; text-align: center; font-size: 11px; color: #8a909c; }
+.gta-menu-hint b { color: #cdd3dc; }
+/* while the settings overlay is open, hide the aiming reticles (body.gta-menu-open
+   is toggled by hud-radar.js) so they don't sit under the panel. */
+body.gta-menu-open #gta-crosshair, body.gta-menu-open #foot-crosshair { display: none !important; }
