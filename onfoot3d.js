@@ -42,8 +42,8 @@ const HIT_R = 1.0;           // how close the aim ray must pass a ped to hit
 const AMMO_MAX = 12;
 const RELOAD_TIME = 1.15;    // seconds
 const FIRE_COOLDOWN = 0.14;  // min seconds between shots
-const NPC_COUNT = 16;
-const BOUND = 58;            // half-size of the walkable town square
+const NPC_COUNT = 24;        // crowd size — scaled up for the bigger zoned town
+const BOUND = 84;            // half-size of the walkable town square (7x7 zoned grid)
 const RESPAWN_DELAY = 4.0;   // seconds a downed ped stays before a new one strolls in
 
 // ---- driving (arcade, GTA-ish) ---------------------------------------------
@@ -332,28 +332,91 @@ function buildPerson(colors, armed) {
   return g;
 }
 
-// A low-poly building cluster filling a town cell, with lit windows.
+// A low-poly building filling (part of) a town cell, with lit windows. The town
+// now has distinct zones — the optional styling is read POSITIONALLY from
+// arguments[1] (NOT a named 2nd param) so the headless scene-stats tool, which
+// extracts this function by its exact signature text and runs it in isolation,
+// keeps working and still calls it as buildBuilding with rng alone. Kept fully
+// self-contained (THREE + rng + locals only), and brace-balanced even in comments,
+// for that same reason (the extractor counts braces in comments too).
 function buildBuilding(rng) {
+  const opts = (arguments.length > 1 && arguments[1]) || {};
+  const zone = opts.zone || 'midtown';   // 'downtown'|'midtown'|'industrial'|'residential'
   const g = new THREE.Group();
-  const h = 6 + rng() * 18;
-  const w = 7 + rng() * 5, d = 7 + rng() * 5;
-  const tones = [0x6b7280, 0x7a6f63, 0x5c6b7a, 0x736a78, 0x6f7a6a];
+
+  // zone presets: height/footprint bands, window density, palette, winKey. winKey
+  // selects a shared emissive window material at instancing time (0 cool office
+  // white, 1 warm, 2 dim industrial) — keep the colours below in sync with the
+  // shared materials built in ensureInit's window-instancing pass.
+  let hLo, hHi, wLo, wHi, winChance, winKey, tones;
+  switch (zone) {
+    case 'downtown':
+      hLo = 16; hHi = 32; wLo = 7; wHi = 11; winChance = 0.82; winKey = 0;
+      tones = [0x6b7280, 0x5c6b7a, 0x4f5a66, 0x737a82, 0x5a6470]; break;
+    case 'industrial':
+      hLo = 5; hHi = 9; wLo = 10; wHi = 13; winChance = 0.3; winKey = 2;
+      tones = [0x7a7266, 0x6f6a60, 0x83786a, 0x6b6258, 0x7d7468]; break;
+    case 'residential':
+      hLo = 4; hHi = 7; wLo = 6; wHi = 9; winChance = 0.7; winKey = 1;
+      tones = [0x8a6f5a, 0x7d6e63, 0x96785f, 0x6f6258, 0x8f8378]; break;
+    case 'midtown':
+    default:
+      hLo = 9; hHi = 20; wLo = 7; wHi = 11; winChance = 0.66; winKey = 1;
+      tones = [0x6b7280, 0x7a6f63, 0x5c6b7a, 0x736a78, 0x6f7a6a]; break;
+  }
+
+  const h = hLo + rng() * (hHi - hLo);
+  const w = wLo + rng() * (wHi - wLo), d = wLo + rng() * (wHi - wLo);
   const tone = tones[(rng() * tones.length) | 0];
   const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d),
     new THREE.MeshStandardMaterial({ color: tone, roughness: 0.9 }));
   body.position.y = h / 2; body.castShadow = true; body.receiveShadow = true;
   g.add(body);
-  // window strips: emissive yellow squares on the +Z and -Z faces
-  const winMat = new THREE.MeshStandardMaterial({ color: 0xffe39a, emissive: 0xffcf6a, emissiveIntensity: 0.85, roughness: 0.5 });
-  const rows = Math.max(2, (h / 2.6) | 0), cols = Math.max(2, (w / 2.2) | 0);
+
+  // ROOF dressing for skyline variety: a pitched cap on houses; a parapet + a
+  // rooftop housing box on tall blocks.
+  if (zone === 'residential') {
+    const roof = new THREE.Mesh(new THREE.ConeGeometry(1, 1, 4),
+      new THREE.MeshStandardMaterial({ color: 0x5a4636, roughness: 0.95 }));
+    roof.rotation.y = Math.PI / 4; roof.scale.set(w * 0.72, 1.3, d * 0.72);
+    roof.position.y = h + 0.65; roof.castShadow = true; g.add(roof);
+  } else if (h > 12) {
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(w + 0.4, 0.5, d + 0.4),
+      new THREE.MeshStandardMaterial({ color: 0x3f444c, roughness: 0.85 }));
+    cap.position.y = h + 0.2; cap.castShadow = true; g.add(cap);
+    if (rng() < 0.7) {
+      const hut = new THREE.Mesh(new THREE.BoxGeometry(w * 0.3, 1.4, d * 0.3),
+        new THREE.MeshStandardMaterial({ color: 0x4a4f57, roughness: 0.9 }));
+      hut.position.set((rng() - 0.5) * w * 0.3, h + 1.1, (rng() - 0.5) * d * 0.3);
+      hut.castShadow = true; g.add(hut);
+    }
+  }
+
+  // WINDOW strips: emissive squares on the ±Z faces (downtown also gets ±X for a
+  // denser skyline). Each is tagged userData.winKey so ensureInit can collapse
+  // EVERY window in the town into a few InstancedMeshes (one per key) — that
+  // batching is what keeps the bigger, taller map cheap on draw calls.
+  const winCol = [0xbfe0ff, 0xffe39a, 0xc9c2a8][winKey];   // must match instancifyTown winMats
+  const winEm = [0x9ecbff, 0xffcf6a, 0x9a8f60][winKey];
+  const winEi = winKey === 2 ? 0.75 : 0.85;                // industrial intentionally dimmer
+  const winMat = new THREE.MeshStandardMaterial({ color: winCol, emissive: winEm, emissiveIntensity: winEi, roughness: 0.5 });
+  const rows = Math.max(2, (h / 2.6) | 0);
   const winGeo = new THREE.BoxGeometry(0.9, 1.1, 0.1);
-  for (let face = -1; face <= 1; face += 2) {
-    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-      if (rng() < 0.35) continue; // some windows dark
-      const win = new THREE.Mesh(winGeo, winMat);
-      win.position.set(-w / 2 + 1.1 + c * (w - 2.2) / Math.max(1, cols - 1),
-        1.6 + r * (h - 2.4) / Math.max(1, rows - 1), face * (d / 2 + 0.02));
-      g.add(win);
+  const faces = zone === 'downtown' ? ['z', 'x'] : ['z'];
+  for (const ax of faces) {
+    const span = ax === 'z' ? w : d, depth = ax === 'z' ? d : w;
+    const nC = Math.max(2, (span / 2.2) | 0);
+    for (let face = -1; face <= 1; face += 2) {
+      for (let r = 0; r < rows; r++) for (let c = 0; c < nC; c++) {
+        if (rng() > winChance) continue;       // some windows dark / blank wall
+        const win = new THREE.Mesh(winGeo, winMat);
+        const along = -span / 2 + 1.1 + c * (span - 2.2) / Math.max(1, nC - 1);
+        const up = 1.6 + r * (h - 2.4) / Math.max(1, rows - 1);
+        if (ax === 'z') { win.position.set(along, up, face * (depth / 2 + 0.02)); }
+        else { win.position.set(face * (depth / 2 + 0.02), up, along); win.rotation.y = Math.PI / 2; }
+        win.userData.winKey = winKey;
+        g.add(win);
+      }
     }
   }
   return { mesh: g, w, d };
@@ -548,6 +611,63 @@ function makeRng(seed) {
 }
 
 // ============================================================
+// TOWN BATCHER — collapse the static town repeats into InstancedMeshes (one draw
+// per batch). WINDOWS are the prize: every building makes its own window meshes
+// with their own geometry/material instances, but they're all the SAME
+// 0.9x1.1x0.1 box and have only 3 distinct emissive looks (by userData.winKey),
+// so we merge them ACROSS every building onto one shared geometry + one shared
+// material per key. Sidewalk pads and lamp poles/bulbs already share geo+mat, so
+// they batch by (geo|mat). Building bodies/roofs/huts have unique geometry and are
+// left as individual meshes — so the async texture pass can still map facades onto
+// them. Defensive: any failure leaves the plain meshes. Returns { before, after }.
+// ============================================================
+function instancifyTown(root) {
+  if (!THREE.InstancedMesh) return { before: 0, after: 0 };
+  root.updateMatrixWorld(true);
+  const winGeo = new THREE.BoxGeometry(0.9, 1.1, 0.1);
+  const winMats = [
+    new THREE.MeshStandardMaterial({ color: 0xbfe0ff, emissive: 0x9ecbff, emissiveIntensity: 0.85, roughness: 0.5 }),
+    new THREE.MeshStandardMaterial({ color: 0xffe39a, emissive: 0xffcf6a, emissiveIntensity: 0.85, roughness: 0.5 }),
+    new THREE.MeshStandardMaterial({ color: 0xc9c2a8, emissive: 0x9a8f60, emissiveIntensity: 0.75, roughness: 0.5 }),
+  ];
+  const winByKey = [[], [], []];
+  const buckets = new Map();          // geo|mat -> { geo, mat, items[] }
+  let before = 0;
+  root.traverse((o) => {
+    if (!o.isMesh || o.isInstancedMesh) return;
+    before++;
+    const wk = o.userData && o.userData.winKey;
+    if (wk != null && winByKey[wk]) { winByKey[wk].push(o); return; }
+    if (Array.isArray(o.material) || !o.geometry || !o.material) return;
+    const key = o.geometry.uuid + '|' + o.material.uuid;
+    let b = buckets.get(key);
+    if (!b) { b = { geo: o.geometry, mat: o.material, items: [] }; buckets.set(key, b); }
+    b.items.push(o);
+  });
+  let after = 0;
+  const bake = (geo, mat, items) => {
+    const inst = new THREE.InstancedMesh(geo, mat, items.length);
+    inst.castShadow = items.some((m) => m.castShadow);
+    inst.receiveShadow = items.some((m) => m.receiveShadow);
+    inst.frustumCulled = false;   // instances span the whole map; base-geo culling would wrongly hide them
+    for (let i = 0; i < items.length; i++) { items[i].updateWorldMatrix(true, false); inst.setMatrixAt(i, items[i].matrixWorld); }
+    inst.instanceMatrix.needsUpdate = true;
+    root.add(inst); after++;
+    for (const m of items) m.removeFromParent();
+  };
+  for (let k = 0; k < winByKey.length; k++) if (winByKey[k].length) bake(winGeo, winMats[k], winByKey[k]);
+  for (const b of buckets.values()) {
+    if (b.items.length < 2) { after++; continue; }   // singletons (bodies/roofs/huts) stay as meshes
+    bake(b.geo, b.mat, b.items);
+  }
+  // sweep up now-empty groups (cosmetic tidy)
+  const empties = [];
+  root.traverse((o) => { if (o !== root && o.isGroup && o.children.length === 0) empties.push(o); });
+  for (const g of empties) g.removeFromParent();
+  return { before, after };
+}
+
+// ============================================================
 // INIT — build the town once (lazy, on first enter)
 // ============================================================
 function ensureInit() {
@@ -581,9 +701,9 @@ function ensureInit() {
   const sun = new THREE.DirectionalLight(0xffe2b0, 1.9);
   sun.position.set(-40, 60, 30); sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.near = 1; sun.shadow.camera.far = 220;
-  sun.shadow.camera.left = -80; sun.shadow.camera.right = 80;
-  sun.shadow.camera.top = 80; sun.shadow.camera.bottom = -80;
+  sun.shadow.camera.near = 1; sun.shadow.camera.far = 300;
+  sun.shadow.camera.left = -105; sun.shadow.camera.right = 105;
+  sun.shadow.camera.top = 105; sun.shadow.camera.bottom = -105;   // covers the wider 7x7 town
   sun.shadow.bias = -0.0004;
   scene.add(sun); scene.add(sun.target);
 
@@ -596,41 +716,87 @@ function ensureInit() {
     new THREE.MeshStandardMaterial({ color: 0x3a3a40, roughness: 0.95 }));
   asphalt.rotation.x = -Math.PI / 2; asphalt.position.y = -0.01; asphalt.receiveShadow = true;
   scene.add(asphalt);
-  // a few yellow street stripes for readability
-  const stripeMat = new THREE.MeshBasicMaterial({ color: 0xffea88 });
-  for (let i = -2; i <= 2; i++) {
-    for (let s = -BOUND + 4; s < BOUND; s += 8) {
-      const st = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 3), stripeMat);
-      st.rotation.x = -Math.PI / 2; st.position.set(i * 24, 0.005, s); scene.add(st);
-    }
-  }
+  // (street markings — crosswalks + lane dashes — are painted by gta/onfoot-detail.js,
+  //  which lays them on the real street lines; the old block-centre stripes are gone.)
 
-  // town blocks on a 5x5 grid; skip the central cell (your spawn plaza)
+  // ============================================================
+  // TOWN — a 7x7 grid (CELL=24) of zoned blocks around an open spawn plaza.
+  // Zones radiate out from the centre: a tall DOWNTOWN core (sometimes clustered),
+  // a MIDTOWN ring, then an outer ring split into a west INDUSTRIAL belt and east
+  // RESIDENTIAL streets. Everything is parented to one `town` group; afterwards the
+  // hundreds of window meshes (and the shared lamp parts + sidewalk pads) are
+  // collapsed into a few InstancedMeshes so the bigger, denser map stays cheap.
+  // ============================================================
   const rng = makeRng(0x51EAD7);
-  const CELL = 24;
-  for (let gx = -2; gx <= 2; gx++) {
-    for (let gz = -2; gz <= 2; gz++) {
-      if (gx === 0 && gz === 0) continue;           // spawn plaza, kept open
+  const CELL = 24, GRID = 3;
+  const town = new THREE.Group(); town.name = 'town';
+
+  // shared resources for the per-cell repeats (so the batcher can merge them)
+  const padGeo = new THREE.PlaneGeometry(20, 20);
+  const padMat = new THREE.MeshStandardMaterial({ color: 0x8f8b82, roughness: 0.97 });   // concrete sidewalk
+  const lampPoleGeo = new THREE.CylinderGeometry(0.1, 0.12, 4, 8);
+  const lampPoleMat = new THREE.MeshStandardMaterial({ color: 0x33363c });
+  const lampBulbGeo = new THREE.SphereGeometry(0.28, 10, 10);
+  const lampBulbMat = new THREE.MeshStandardMaterial({ color: 0xfff0b0, emissive: 0xffd070, emissiveIntensity: 1.2 });
+
+  const zoneFor = (gx, gz) => {
+    const ring = Math.max(Math.abs(gx), Math.abs(gz));
+    if (ring <= 1) return 'downtown';
+    if (ring === 2) return 'midtown';
+    return gx < 0 ? 'industrial' : 'residential';   // outer ring
+  };
+  const placeBuilding = (cx, cz, zone, ox, oz) => {
+    const { mesh, w, d } = buildBuilding(rng, { zone });
+    mesh.position.set(cx + ox, 0, cz + oz);
+    town.add(mesh);
+    aabbs.push({ minX: cx + ox - w / 2, maxX: cx + ox + w / 2, minZ: cz + oz - d / 2, maxZ: cz + oz + d / 2 });
+  };
+
+  for (let gx = -GRID; gx <= GRID; gx++) {
+    for (let gz = -GRID; gz <= GRID; gz++) {
+      if (gx === 0 && gz === 0) continue;                  // spawn plaza, kept open
       if (gx === 0 && (gz === -1 || gz === -2)) continue;  // open corridor to the bank (gta heist)
-      if (rng() < 0.18) continue;                   // occasional empty lot
+      const zone = zoneFor(gx, gz);
+      const emptyP = zone === 'downtown' ? 0.05 : zone === 'midtown' ? 0.16 : 0.3;
+      if (rng() < emptyP) continue;                        // occasional empty lot (airier outer rings)
       const cx = gx * CELL, cz = gz * CELL;
-      const { mesh, w, d } = buildBuilding(rng);
-      // jitter inside the cell but keep clear of the cross-streets
-      const ox = (rng() - 0.5) * 3, oz = (rng() - 0.5) * 3;
-      mesh.position.set(cx + ox, 0, cz + oz);
-      scene.add(mesh);
-      aabbs.push({ minX: cx + ox - w / 2, maxX: cx + ox + w / 2, minZ: cz + oz - d / 2, maxZ: cz + oz + d / 2 });
-      // street lamp on a corner
-      if (rng() < 0.7) {
+
+      // concrete sidewalk pad grounds the block (street asphalt shows in the gaps)
+      const pad = new THREE.Mesh(padGeo, padMat);
+      pad.rotation.x = -Math.PI / 2; pad.position.set(cx, 0.0, cz); pad.receiveShadow = true;
+      town.add(pad);
+
+      // downtown cells sometimes hold a small cluster of towers; else one block.
+      // Offsets are kept tight (single ≤±1, cluster radius ≤~3.1) so even the
+      // widest footprint (industrial half ≈6.5, downtown half ≈5.5) stays ≥~3
+      // units shy of the cross-street centreline at ±12 — drivable clearance.
+      const cluster = zone === 'downtown' && rng() < 0.5 ? (rng() < 0.5 ? 2 : 3) : 1;
+      if (cluster === 1) {
+        placeBuilding(cx, cz, zone, (rng() - 0.5) * 2, (rng() - 0.5) * 2);
+      } else {
+        for (let i = 0; i < cluster; i++) {
+          const a = (i / cluster) * Math.PI * 2 + rng();
+          const rr = 2.0 + rng() * 1.1;
+          placeBuilding(cx, cz, zone, Math.cos(a) * rr, Math.sin(a) * rr);
+        }
+      }
+
+      // a simple street lamp near the block corner (shared geo/mat -> batched)
+      if (rng() < 0.55) {
         const lamp = new THREE.Group();
-        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.12, 4, 8),
-          new THREE.MeshStandardMaterial({ color: 0x33363c })); pole.position.y = 2; pole.castShadow = true;
-        const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 10),
-          new THREE.MeshStandardMaterial({ color: 0xfff0b0, emissive: 0xffd070, emissiveIntensity: 1.2 })); bulb.position.y = 4;
-        lamp.add(pole, bulb); lamp.position.set(cx + w / 2 + 2, 0, cz + d / 2 + 2); scene.add(lamp);
+        const pole = new THREE.Mesh(lampPoleGeo, lampPoleMat); pole.position.y = 2; pole.castShadow = true;
+        const bulb = new THREE.Mesh(lampBulbGeo, lampBulbMat); bulb.position.y = 4;
+        lamp.add(pole, bulb); lamp.position.set(cx + 11, 0, cz + 11); town.add(lamp);
       }
     }
   }
+  scene.add(town);
+  // collapse all the static repeats (windows across every building, sidewalk pads,
+  // lamp poles/bulbs) into a handful of InstancedMeshes — the big draw-call win.
+  try {
+    const r = instancifyTown(town);
+    console.log(`[ONFOOT world] town batched: ${r.before} meshes -> ${r.after} draws (${town.children.length} top-level)`);
+  } catch (e) { console.warn('[ONFOOT world] town instancing skipped', e); }
 
   // drivable cars: the red convertible at the plaza + parked cars on the streets
   // (x=±12 / z=±12 sit in the cross-streets between the building blocks)
