@@ -1393,7 +1393,17 @@ function ensureInit() {
 const SHIRTS = [0xc94f4f, 0x4f7fc9, 0x4fae6b, 0xc9a24f, 0x8a4fc9, 0xc97fae, 0x4fbfc9, 0xb0683a];
 function spawnPed(rng, atRandomSpot) {
   const r = rng || Math.random;
-  const colors = { skin: [0xd9a679, 0xc68642, 0xf1c27d, 0x8d5524][(r() * 4) | 0], shirt: SHIRTS[(r() * SHIRTS.length) | 0], pants: 0x33343b, hair: 0x241a12 };
+  // crowd variety: vary skin / shirt / pants / hair per spawn so pedestrians don't
+  // read as clones (shirt also tints the rigged actor when that art is loaded).
+  const SKINS = [0xd9a679, 0xc68642, 0xf1c27d, 0x8d5524, 0xe8b88f, 0x6f4a2a];
+  const PANTS = [0x33343b, 0x4a3b2e, 0x2b3a4a, 0x5a5048, 0x394150, 0x6b5d4f, 0x222428];
+  const HAIRS = [0x241a12, 0x0e0e10, 0x4a3526, 0x6b5640, 0x8a7a66, 0x2e2018, 0x3a3a40];
+  const colors = {
+    skin: SKINS[(r() * SKINS.length) | 0],
+    shirt: SHIRTS[(r() * SHIRTS.length) | 0],
+    pants: PANTS[(r() * PANTS.length) | 0],
+    hair: HAIRS[(r() * HAIRS.length) | 0],
+  };
   const mesh = buildPerson(colors, false);
   const mats = [];
   mesh.traverse((o) => { if (o.isMesh) mats.push(o.material); });

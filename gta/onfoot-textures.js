@@ -75,6 +75,59 @@ function _toTexture(THREE, cv) {
   }
 }
 
+// Derive a tangent-space NORMAL MAP from a drawn colour canvas, treating pixel
+// luminance as a height field (bright = raised). This is the single biggest AAA
+// upgrade for the town: it gives flat-shaded facades, brick, concrete and asphalt
+// real lit relief (mortar grooves, window-frame depth, surface tooth) for ZERO
+// extra geometry — the renderer is already PBR with an env map + SSAO, it was just
+// being fed colour-only materials. Tiling-safe (wraps at the edges) and fully
+// defensive: returns null in any headless/no-canvas context so beautifyScene skips.
+function _normalTexture(THREE, srcCanvas, strength) {
+  try {
+    if (!THREE || !srcCanvas || typeof THREE.CanvasTexture !== 'function') return null;
+    const sctx = srcCanvas.getContext && srcCanvas.getContext('2d');
+    if (!sctx || typeof sctx.getImageData !== 'function') return null;
+    const W = srcCanvas.width | 0, H = srcCanvas.height | 0;
+    if (W < 2 || H < 2) return null;
+    const src = sctx.getImageData(0, 0, W, H).data;
+    // luminance height field (0..1)
+    const hgt = new Float32Array(W * H);
+    for (let i = 0, p = 0; i < hgt.length; i++, p += 4) {
+      hgt[i] = (src[p] * 0.299 + src[p + 1] * 0.587 + src[p + 2] * 0.114) / 255;
+    }
+    const made = _makeCanvas(W);
+    if (!made) return null;
+    const out = made.ctx.createImageData(W, H), od = out.data;
+    const k = (strength == null ? 1.0 : strength) * 2.2;
+    const at = (x, y) => hgt[((y % H) + H) % H * W + (((x % W) + W) % W)];   // wrap → tiling-safe
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        // central-difference gradient → surface normal (OpenGL +Y-up convention)
+        const dx = (at(x - 1, y) - at(x + 1, y)) * k;
+        const dy = (at(x, y - 1) - at(x, y + 1)) * k;
+        let nx = dx, ny = dy, nz = 1;
+        const inv = 1 / (Math.hypot(nx, ny, nz) || 1);
+        nx *= inv; ny *= inv; nz *= inv;
+        const o = (y * W + x) * 4;
+        od[o] = (nx * 0.5 + 0.5) * 255;
+        od[o + 1] = (ny * 0.5 + 0.5) * 255;
+        od[o + 2] = (nz * 0.5 + 0.5) * 255;
+        od[o + 3] = 255;
+      }
+    }
+    made.ctx.putImageData(out, 0, 0);
+    const tex = new THREE.CanvasTexture(made.cv);
+    tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+    // normal maps are DATA, not colour — they MUST stay linear (no sRGB decode)
+    if ('colorSpace' in tex) tex.colorSpace = (THREE.NoColorSpace != null ? THREE.NoColorSpace : (THREE.LinearSRGBColorSpace || tex.colorSpace));
+    else if ('encoding' in tex && THREE.LinearEncoding != null) tex.encoding = THREE.LinearEncoding;
+    tex.anisotropy = 8; tex.generateMipmaps = true; tex.needsUpdate = true;
+    return tex;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ---- low-level drawing helpers --------------------------------------------
 // Fill the whole canvas with a flat base colour.
 function _fill(ctx, size, color) {
@@ -484,20 +537,32 @@ export function makeTextures(THREE) {
   if (_texTried && _texCache) return _texCache;
   _texTried = true;
 
-  const out = { asphalt: null, grass: null, concrete: null, facade: null, facadeB: null, precast: null, brick: null, sidewalk: null };
+  const out = {
+    asphalt: null, grass: null, concrete: null, facade: null, facadeB: null, precast: null, brick: null, sidewalk: null,
+    // matching tangent-space normal maps (null-tolerant; beautifyScene only uses what exists)
+    asphaltN: null, grassN: null, concreteN: null, facadeN: null, facadeBN: null, precastN: null, brickN: null, sidewalkN: null,
+  };
   if (!THREE || typeof THREE.CanvasTexture !== 'function') {
     _texCache = out;
     return out;
   }
+  // draw each surface ONCE, then derive both the colour texture and a normal map
+  // from the same canvas (`strength` tuned per surface — masonry gets stronger
+  // relief than asphalt). One-time build-phase work; cached forever after.
+  const pair = (drawFn, size, colKey, strength) => {
+    const cv = drawFn(size);
+    out[colKey] = _toTexture(THREE, cv);
+    out[colKey + 'N'] = _normalTexture(THREE, cv, strength);
+  };
   try {
-    out.asphalt = _toTexture(THREE, _drawAsphalt(512));
-    out.grass = _toTexture(THREE, _drawGrass(512));
-    out.concrete = _toTexture(THREE, _drawConcrete(256));
-    out.facade = _toTexture(THREE, _drawFacade(512));
-    out.facadeB = _toTexture(THREE, _drawFacadeB(512));
-    out.precast = _toTexture(THREE, _drawPrecast(512));
-    out.brick = _toTexture(THREE, _drawBrick(512));
-    out.sidewalk = _toTexture(THREE, _drawSidewalk(512));
+    pair(_drawAsphalt, 512, 'asphalt', 0.7);
+    pair(_drawGrass, 512, 'grass', 0.5);
+    pair(_drawConcrete, 256, 'concrete', 0.8);
+    pair(_drawFacade, 512, 'facade', 1.15);
+    pair(_drawFacadeB, 512, 'facadeB', 1.15);
+    pair(_drawPrecast, 512, 'precast', 1.0);
+    pair(_drawBrick, 512, 'brick', 1.35);
+    pair(_drawSidewalk, 512, 'sidewalk', 0.9);
   } catch (e) {
     // partial set is fine; beautifyScene tolerates nulls
     if (typeof console !== 'undefined') console.warn('[onfoot-textures] makeTextures partial:', e);
@@ -577,6 +642,19 @@ function _polish(mat, envBump) {
   }
 }
 
+// Attach a tangent-space normal map (reusing the colour map's tiling repeat) so the
+// surface gains lit relief. normalScale tunes how deep the relief reads. No-op if the
+// normal texture wasn't generated (headless / no canvas) — the colour map still applies.
+function _setNormal(THREE, mat, nTex, rx, ry, scale) {
+  if (!mat || !nTex) return;
+  const t = _repeated(nTex, rx, ry);
+  if (!t) return;
+  mat.normalMap = t;
+  const s = scale == null ? 0.8 : scale;
+  if (mat.normalScale && mat.normalScale.set) mat.normalScale.set(s, s);
+  else if (THREE && THREE.Vector2) mat.normalScale = new THREE.Vector2(s, s);
+}
+
 // ============================================================
 // PUBLIC: beautifyScene(THREE, scene, opts) — upgrade the town look in place.
 // Returns the number of meshes it upgraded.
@@ -635,11 +713,13 @@ export function beautifyScene(THREE, scene, opts = {}) {
         if (isGreen && tex.grass) {
           const rep = Math.max(1, Math.round(plane.w / 12));
           mat.map = _repeated(tex.grass, rep, rep);
+          _setNormal(THREE, mat, tex.grassN, rep, rep, 0.5);
           if (mat.roughness != null) mat.roughness = Math.max(mat.roughness, 0.95);
           mapped = true;
         } else if ((isDark || !isGreen) && tex.asphalt) {
           const rep = Math.max(1, Math.round(plane.w / 16));
           mat.map = _repeated(tex.asphalt, rep, rep);
+          _setNormal(THREE, mat, tex.asphaltN, rep, rep, 0.6);
           if (mat.roughness != null) mat.roughness = Math.max(mat.roughness, 0.92);
           mapped = true;
         }
@@ -652,6 +732,7 @@ export function beautifyScene(THREE, scene, opts = {}) {
           const rep = Math.max(1, Math.round(plane.w / 5));   // ~5-unit paver slabs
           mat.map = _repeated(tex.sidewalk, rep, rep);
           mat.roughnessMap = _repeated(tex.sidewalk, rep, rep);
+          _setNormal(THREE, mat, tex.sidewalkN, rep, rep, 0.7);   // paver-seam relief
           if (mat.roughness != null) mat.roughness = Math.max(mat.roughness, 0.95);
           mapped = true;
         }
@@ -678,6 +759,12 @@ export function beautifyScene(THREE, scene, opts = {}) {
               mat.map = _repeated(baseTex, repX, repY);
               // reuse the same image as a subtle roughnessMap for micro-relief
               mat.roughnessMap = _repeated(baseTex, repX, repY);
+              // matching normal map → window-frame depth, panel seams, brick mortar grooves
+              const nTex = baseTex === tex.facade ? tex.facadeN
+                : baseTex === tex.facadeB ? tex.facadeBN
+                : baseTex === tex.precast ? tex.precastN
+                : baseTex === tex.brick ? tex.brickN : null;
+              _setNormal(THREE, mat, nTex, repX, repY, 0.9);
               if (mat.roughness != null) mat.roughness = Math.min(1, Math.max(0.8, mat.roughness));
               mapped = true;
             }

@@ -466,7 +466,7 @@ function onEnter() {
         _realismBuilt = true;
         window.ONFOOT.layerReady = false;   // hold the loading screen until this async setup settles
         Promise.all([import('./onfoot-textures.js'), import('./onfoot-render.js')]).then(async ([tex, rmod]) => {
-          try { if (tex && tex.beautifyScene) tex.beautifyScene(I.THREE, I.scene, { envMapIntensity: 0.5 }); } catch (e) { console.warn('[GTA] beautify skipped', e); }
+          try { if (tex && tex.beautifyScene) tex.beautifyScene(I.THREE, I.scene, { envMapIntensity: 0.9 }); } catch (e) { console.warn('[GTA] beautify skipped', e); }
           try {
             if (rmod && rmod.installRealism) {
               const rl = await rmod.installRealism(I.THREE, I.renderer, I.scene, I.camera, I.canvas, {});   // async (env map + composer)
