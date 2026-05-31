@@ -38,8 +38,8 @@ const SPARK_CAP = 220;        // max live spark points (one additive draw call)
 const SMOKE_CAP = 220;        // max live dust/blood/decal points (one alpha draw call)
 const SHAKE_MAX = 1.6;        // trauma ceiling
 const SHAKE_DECAY = 1.7;      // trauma units shed per second
-const SHAKE_POS = 0.22;       // world-units of camera translation at full shake
-const SHAKE_ROLL = 0.035;     // radians of camera roll at full shake
+const SHAKE_POS = 0.12;       // world-units of camera translation at full shake (dialed down ~45% per playtest — less shake all around)
+const SHAKE_ROLL = 0.018;     // radians of camera roll at full shake (dialed down ~half per playtest)
 const STRIDE = 2.15;          // world-units between footstep sounds while walking
 const PGRAV = 16;             // particle gravity (units/s^2)
 
