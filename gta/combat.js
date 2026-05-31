@@ -73,6 +73,9 @@ let _meleeFwd = null;              // melee forward direction (flat XZ)
 let _crimePos = null;              // reusable crime/pos payload vector
 let _beamDir = null;               // tracer beam direction (normalized)
 let _beamUp = null;                // +Y reference for orienting the beam cylinder
+let _casingWorld = null;           // world pos of the gun's ejection port (fx:casing)
+let _casingDir = null;             // casing toss direction (gun's right, biased up)
+let _ejQuat = null;                // scratch quaternion for the eject node's world rotation
 
 // Per-weapon tracer/flash styling: a warm glow + a near-white hot core, sized and
 // tinted per weapon so each gun reads differently down-range.
@@ -132,6 +135,9 @@ const combat = {
     _crimePos = new THREE.Vector3();
     _beamDir = new THREE.Vector3();
     _beamUp = new THREE.Vector3(0, 1, 0);
+    _casingWorld = new THREE.Vector3();
+    _casingDir = new THREE.Vector3();
+    _ejQuat = new THREE.Quaternion();
 
     // ----- loadout: start with just fists (host hands out pistol later) -----
     if (!this.owned) {
@@ -362,6 +368,9 @@ const combat = {
 
     // muzzle flash at the avatar's muzzle node
     this._spawnFlash(ctx, style);
+    // eject ONE spent casing per shot from the gun's breech (Lane B's fx.js renders
+    // the spinning shell + ping). Outside the pellet loop so a shotgun ejects one shell.
+    this._emitCasing(ctx, w);
 
     // feedback + crime + recoil
     if (player) {
@@ -561,6 +570,28 @@ const combat = {
     if (mz && mz.getWorldPosition) { mz.getWorldPosition(out); return out; }
     if (ctx.camera) { out.copy(ctx.camera.position).addScaledVector(_dir, 0.5); return out; }
     out.set(0, 1.3, 0); return out;
+  },
+
+  // Eject a spent shell: emit fx:casing {pos, dir, weaponId} from the equipped gun's
+  // ejection port (player.mesh.userData.eject, kept current by setWeapon). pos = port
+  // world position; dir = the gun's RIGHT (eject-local +X in world) biased upward.
+  // Fresh plain objects are sent (NOT scratch) so fx.js can hold them across frames.
+  // No-op for fists; a safe no-op too when nobody subscribes (bus.emit ignores it).
+  _emitCasing(ctx, w) {
+    if (!w || w.id === 'fists' || !ctx.bus) return;
+    const player = ctx.player;
+    const ej = player && player.mesh && player.mesh.userData ? player.mesh.userData.eject : null;
+    if (ej && ej.getWorldPosition) ej.getWorldPosition(_casingWorld);
+    else _casingWorld.copy(_muzzleWorld);                          // fallback: muzzle world pos from _fire
+    if (ej && ej.getWorldQuaternion) _casingDir.set(1, 0, 0).applyQuaternion(ej.getWorldQuaternion(_ejQuat));
+    else _casingDir.crossVectors(_dir, _beamUp);                   // fallback: camera-right vector (forward × up)
+    if (_casingDir.lengthSq() < 1e-6) _casingDir.set(1, 0, 0);
+    _casingDir.y += 0.5; _casingDir.normalize();                  // arc the toss upward a touch
+    ctx.bus.emit('fx:casing', {
+      pos: { x: _casingWorld.x, y: _casingWorld.y, z: _casingWorld.z },
+      dir: { x: _casingDir.x, y: _casingDir.y, z: _casingDir.z },
+      weaponId: w.id,
+    });
   },
 
   _spawnTracer(a, b, style) {
