@@ -94,6 +94,7 @@ const RUN_OVER_SPEED = 5;    // min speed to knock down a ped you drive into
 const OF = {
   active: false,
   ready: false,
+  firstPerson: false,   // first-person toggle (V); Lane B reads this in the camera/viewmodel path
   enter,
   exit,
   unlocked: () => localStorage.getItem('wrt.onfoot.unlocked') === 'true',
@@ -1060,10 +1061,21 @@ function onKeyDown(e) {
     return;
   }
   if (e.code === 'KeyP') { exit(); return; }             // leave the whole on-foot mode
+  if (e.code === 'KeyV') { toggleFirstPerson(); return; }  // first/third-person toggle
   if (mode === 'foot') {
     if (e.code === 'Space' && player.grounded) { player.vy = JUMP_V; player.grounded = false; }
     if (e.code === 'KeyR') reload();
   }
+}
+
+// First-person toggle (Lane D owns the STATE; Lane B owns the camera/viewmodel).
+// We flip OF.firstPerson, keep the body mesh from clipping the eye-cam, and notify
+// the systems layer (bridge emits 'fp:toggle'); the aim ray is camera-based so it
+// stays correct in either mode without touching the fire origin.
+function toggleFirstPerson() {
+  OF.firstPerson = !OF.firstPerson;
+  if (player.mesh && mode === 'foot') player.mesh.visible = !OF.firstPerson;
+  if (OF.onFpToggle) { try { OF.onFpToggle(OF.firstPerson); } catch (e) { console.error('[ONFOOT] onFpToggle failed', e); } }
 }
 function onKeyUp(e) {
   if (!OF.active) return;
@@ -1246,8 +1258,8 @@ function enterBuild() {
 
     // reset to on-foot at the plaza next to the car (clear any prior drive state)
     mode = 'foot'; playerVehicle = null; _camInit = false;
-    if (player.mesh) player.mesh.visible = true;
-    for (const v of vehicles) { v.occupied = false; v.speed = 0; v.mesh.rotation.z = 0; }
+    if (player.mesh) player.mesh.visible = !OF.firstPerson;   // hidden body in FP (no eye-cam clip)
+    for (const v of vehicles) { v.occupied = false; v.speed = 0; v.mesh.rotation.z = 0; v.crashJolt = 0; }
     player.pos.set(2.4, 0, 6); player.vy = 0; player.grounded = true;
     player.ammo = AMMO_MAX; player.reloadT = 0; player.fireT = 0;
     yaw = Math.PI; pitch = -0.1; recoil = 0; kills = 0;
@@ -1445,13 +1457,21 @@ function updateDriving(dt) {
   const steerAuth = Math.max(-1, Math.min(1, v.speed / 6));
   v.heading += steer * CAR_TURN * steerAuth * dt;
 
-  // integrate position along heading; bleed speed on a wall hit
+  // integrate position along heading; on a hard wall hit, hand off to the dynamic
+  // impact physics (gta/physics.js, via OF.carImpact) for a real momentum crash —
+  // velocity bleed/redirect + knockback + body jolt + crumple + shake/fx events.
+  // Falls back to the old simple speed-bleed when that systems layer isn't loaded.
   const fx = Math.sin(v.heading), fz = Math.cos(v.heading);
   const px = v.pos.x, pz = v.pos.z;
-  moveAndCollide(v.pos, fx * v.speed * dt, fz * v.speed * dt, CAR_RADIUS);
+  const stepX = fx * v.speed * dt, stepZ = fz * v.speed * dt;
+  const intendedX = px + stepX, intendedZ = pz + stepZ;
+  moveAndCollide(v.pos, stepX, stepZ, CAR_RADIUS);
   const moved = Math.hypot(v.pos.x - px, v.pos.z - pz);
   const intended = Math.abs(v.speed) * dt;
-  if (intended > 0.05 && moved < intended * 0.5) v.speed *= 0.25;  // crunched into a building
+  if (intended > 0.05 && moved < intended * 0.5) {
+    if (OF.carImpact) OF.carImpact(v, { speed: v.speed, dt, dirx: fx, dirz: fz, intended, moved, pushX: v.pos.x - intendedX, pushZ: v.pos.z - intendedZ });
+    else v.speed *= 0.25;   // crunched into a building (base behaviour, no systems layer)
+  }
 
   // run over any live ped you plough into at speed
   if (Math.abs(v.speed) > RUN_OVER_SPEED) {
@@ -1465,6 +1485,7 @@ function updateDriving(dt) {
   v.mesh.position.copy(v.pos);
   v.mesh.rotation.y = v.heading;
   v.mesh.rotation.z = lerpNum(v.mesh.rotation.z, -steer * steerAuth * 0.06, 0.2);
+  v.mesh.rotation.x = -(v.crashJolt || 0);   // transient nose-pitch from a crash (gta/physics.js)
   for (let i = 0; i < v.wheels.length; i++) v.wheels[i].rotation.x -= v.speed * dt * 0.6;  // roll
   for (const sp of v.steerPivots) sp.rotation.y = steer * 0.4;                              // front-wheel steer
 
@@ -1507,13 +1528,14 @@ function exitVehicle() {
   v.speed = 0;
   v.occupied = false;
   v.mesh.rotation.z = 0;
+  v.crashJolt = 0; v.mesh.rotation.x = 0;   // clear any crash-pitch left by gta/physics.js
   // step out beside the car (door side), then shove clear of any wall
   const sx = Math.cos(v.heading), sz = -Math.sin(v.heading);   // car's side unit vector
   player.pos.set(v.pos.x + sx * 2.4, 0, v.pos.z + sz * 2.4);
   resolveCollision(player.pos, PLAYER_R);
   player.vy = 0; player.grounded = true; player.facing = v.heading;
   yaw = v.heading; pitch = -0.1;         // align the on-foot orbit cam behind the player (no snap)
-  player.mesh.visible = true;
+  player.mesh.visible = !OF.firstPerson;   // hidden body in FP (no eye-cam clip)
   player.mesh.position.copy(player.pos);
   playerVehicle = null;
   mode = 'foot';
@@ -1687,6 +1709,7 @@ OF.internals = {
   get pitch() { return pitch; }, set pitch(v) { pitch = v; },
   get locked() { return locked; },
   get mode() { return mode; },
+  get firstPerson() { return OF.firstPerson; },
   get playerVehicle() { return playerVehicle; },
   bound: BOUND,
   resolveCollision, insideBuilding, spawnVehicle, nearestVehicle, enterVehicle, exitVehicle, killPed, startleNearby, justPressed,

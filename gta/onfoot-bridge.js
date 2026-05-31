@@ -24,6 +24,7 @@ import './wanted.js';
 import './economy.js';
 import './police.js';
 import './combat.js';
+import './physics.js';   // dynamic car-vs-building impact (registers the 'physics' system)
 import './hud-radar.js';
 import './onfoot-heist.js';
 import { buildWorldDetail } from './onfoot-detail.js';
@@ -458,6 +459,7 @@ function onTick(dt) {
     ctx.player.facing = I.player.facing;
     ctx.player.inVehicle = !!driving;
     ctx.player.vehicle = driving ? I.playerVehicle : null;
+    ctx.firstPerson = !!I.firstPerson;   // mirror FP state for systems that poll ctx
 
     const pp = I.player.pos;
     if (_lastPx !== null && dt > 0) {
@@ -506,6 +508,27 @@ function install() {
   if (!OF) return false;
   OF.onEnter = onEnter; OF.onExit = onExit; OF.onTick = onTick;
   OF.onKill = onKill; OF.onJack = onJack;
+  // dynamic car-vs-building impact: updateDriving calls this on a hard wall hit.
+  OF.carImpact = (v, info) => {
+    try {
+      const sys = GTA.systems.physics;
+      if (!sys) return 0;
+      // enrich with Lane C's per-building height/zone (I.buildings) for a height-aware
+      // crash — optional + defensive: absent (e.g. headless sim) → plain momentum impact.
+      if (I && I.buildings && v && v.pos && info && info.buildingHeight === undefined) {
+        let best = null, bd = Infinity;
+        for (const b of I.buildings) { const d = (b.cx - v.pos.x) ** 2 + (b.cz - v.pos.z) ** 2; if (d < bd) { bd = d; best = b; } }
+        if (best) { info.buildingHeight = best.height; info.zone = best.zone; }
+      }
+      return sys.api.carImpact(v, info);
+    } catch (e) { console.error('[GTA bridge] carImpact failed', e); return 0; }
+  };
+  // first-person toggle: onfoot3d flips OF.firstPerson + hides the body, then calls
+  // this so systems (fx/hud) hear it. D owns state; B owns the camera/viewmodel.
+  OF.onFpToggle = (state) => {
+    try { if (ctx) ctx.firstPerson = !!state; GTA.bus.emit('fp:toggle', { firstPerson: !!state }); }
+    catch (e) { console.error('[GTA bridge] onFpToggle failed', e); }
+  };
   if (OF.active && !booted) onEnter();
   return true;
 }
