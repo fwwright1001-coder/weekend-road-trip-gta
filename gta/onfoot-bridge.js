@@ -249,6 +249,7 @@ function wireOutcomes() {
 }
 function respawn(cause) {
   try {
+    showWastedScreen(cause);   // dramatized full-screen WASTED/BUSTED beat (DOM-only, headless-safe)
     if (I.mode === 'drive' && I.exitVehicle) I.exitVehicle();
     const lm = ctx.world ? ctx.world.randomLandmark(ctx.rng) : { pos: { x: 0, z: 8 } };
     I.player.pos.set(lm.pos.x, 0, lm.pos.z + 4);
@@ -278,6 +279,39 @@ function wireFeedback() {
     _flashEl.style.transition = 'none'; _flashEl.style.opacity = '0.42';
     requestAnimationFrame(() => { if (_flashEl) { _flashEl.style.transition = 'opacity .5s ease-out'; _flashEl.style.opacity = '0'; } });
   });
+}
+// Full-screen WASTED / BUSTED beat — a cinematic death/arrest moment so the (real,
+// already-wired) stakes LAND emotionally instead of just a toast. Big tinted title +
+// vignette that flashes in fast and fades over the respawn. DOM-only + headless-safe.
+let _wastedEl = null;
+function showWastedScreen(cause) {
+  if (typeof document === 'undefined' || (I && I.headless)) return;
+  try {
+    const frame = document.getElementById('frame') || document.body;
+    if (!_wastedEl) {
+      _wastedEl = document.createElement('div');
+      _wastedEl.id = 'gta-wasted';
+      _wastedEl.style.cssText = 'position:absolute;inset:0;z-index:38;display:grid;place-items:center;text-align:center;'
+        + 'pointer-events:none;opacity:0;font-family:Georgia,serif;font-weight:900;letter-spacing:8px;'
+        + 'text-shadow:0 6px 30px rgba(0,0,0,.85);';
+      _wastedEl.innerHTML = '<div id="gta-wasted-txt" style="font-size:clamp(40px,11vw,120px)"></div>';
+      frame.appendChild(_wastedEl);
+    }
+    const busted = cause === 'busted';
+    _wastedEl.style.background = busted
+      ? 'radial-gradient(circle at 50% 45%, rgba(24,52,104,0.38), rgba(0,2,10,0.84))'
+      : 'radial-gradient(circle at 50% 45%, rgba(96,14,14,0.42), rgba(8,0,0,0.86))';
+    const txt = _wastedEl.querySelector('#gta-wasted-txt');
+    if (txt) { txt.textContent = busted ? 'BUSTED' : 'WASTED'; txt.style.color = busted ? '#86b4ff' : '#ff5a5a'; }
+    _wastedEl.style.display = 'grid';
+    _wastedEl.style.transition = 'none'; _wastedEl.style.opacity = '0';
+    requestAnimationFrame(() => {
+      if (!_wastedEl) return;
+      _wastedEl.style.transition = 'opacity .3s ease-out'; _wastedEl.style.opacity = '1';
+      setTimeout(() => { if (_wastedEl) { _wastedEl.style.transition = 'opacity 1.1s ease-in'; _wastedEl.style.opacity = '0'; } }, 1500);
+      setTimeout(() => { if (_wastedEl) _wastedEl.style.display = 'none'; }, 2750);
+    });
+  } catch (e) { /* a cosmetic flourish must never break respawn */ }
 }
 function ensureFlash() {
   if (_flashEl) return;

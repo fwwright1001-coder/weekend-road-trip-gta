@@ -155,7 +155,7 @@ const world = {
   sun: null, hemi: null, skyU: null, fog: null, rain: null,
   lamps: [],                 // emissive mats registered to brighten at night: {mat, day, night, base}
   t: 0.40,                   // time of day 0..1 (0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 = sunset)
-  speed: 1 / 200,            // a full day in ~200s (visible within a playthrough)
+  speed: 1 / 360,            // a full day in ~360s — longer so the scene spends most of a session in good key light (it still cycles)
   weather: 'clear', wI: 0, wTarget: 0, wTimer: 24, wIdx: 0, wPinned: false, wPending: null,
 };
 const _wc1 = new THREE.Color(), _wc2 = new THREE.Color();   // scratch for colour lerps
@@ -1899,10 +1899,11 @@ function updateWorld(dt) {
   _wc1.set(0xff9a3c).lerp(_wc2.set(0xfff3e0), _clampW(elev * 2.2, 0, 1));
   if (night > 0.6) _wc1.lerp(_wc2.set(0x9fb4d8), (night - 0.6) / 0.4);              // cool moonlight late
   world.sun.color.copy(_wc1);
-  world.sun.intensity = (0.06 + day * 2.0) * (1 - overcast * 0.7);
+  world.sun.intensity = (0.09 + day * 2.0) * (1 - overcast * 0.7);   // small night floor keeps a hint of directional moonlight
 
-  // hemisphere ambient
-  world.hemi.intensity = (0.16 + day * 0.72) * (1 - overcast * 0.4);
+  // hemisphere ambient (raised night floor so forms keep a little dimensional fill
+  // even at midnight instead of reading flat — daytime peak is unchanged)
+  world.hemi.intensity = (0.22 + day * 0.66) * (1 - overcast * 0.4);
   world.hemi.color.set(0x223046).lerp(_wc2.set(0xbcd2ea), day);
   world.hemi.groundColor.set(0x14161c).lerp(_wc2.set(0x53503f), day);
 
@@ -2326,8 +2327,23 @@ function updatePed(p, dt) {
   const l = Math.hypot(dx, dz) || 1;
   if (moving && sp > 0) {
     p.pos.x += (dx / l) * sp * dt; p.pos.z += (dz / l) * sp * dt;
-    resolveCollision(p.pos, PED_R);
   }
+  // SEPARATION — a gentle shove off any ped we're overlapping, so the crowd reads as
+  // individuals threading past each other instead of clipping through one another.
+  // O(n^2) over ~24 peds is trivial; runs even while loitering so clumps don't stack.
+  let sepX = 0, sepZ = 0;
+  for (const q of peds) {
+    if (q === p || q.dead) continue;
+    const ox = p.pos.x - q.pos.x, oz = p.pos.z - q.pos.z;
+    const d2 = ox * ox + oz * oz;
+    if (d2 > 1e-4 && d2 < 1.55 * 1.55) { const inv = 1 / Math.sqrt(d2); sepX += ox * inv; sepZ += oz * inv; }
+  }
+  if (sepX || sepZ) {
+    const sl = Math.hypot(sepX, sepZ) || 1;
+    const push = (moving ? 0.7 : 1.1) * dt;     // firmer shove when idle/clumped than when already walking
+    p.pos.x += (sepX / sl) * push; p.pos.z += (sepZ / sl) * push;
+  }
+  if ((moving && sp > 0) || sepX || sepZ) resolveCollision(p.pos, PED_R);
   p.mesh.position.copy(p.pos);
   p.mesh.rotation.y = Math.atan2(dx, dz);
   p.mesh.scale.y = crouch ? 0.7 : 1;                               // duck while cowering

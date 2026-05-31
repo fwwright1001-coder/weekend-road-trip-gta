@@ -35,6 +35,19 @@ const FLEE_RADIUS    = 22;    // m — events within this spook a car
 const FLEE_RADIUS_SQ = FLEE_RADIUS * FLEE_RADIUS;
 const FLEE_TIME      = 3;     // s of panic before decaying back to cruising
 const FLEE_SPEED_MUL = 1.9;   // target-speed boost while fleeing
+// road-grid lane following: ease the heading onto the road axis at the car and
+// bias it into the right-hand lane (offset from the centerline).
+const LANE_OFFSET    = 2.5;   // m — right-of-centerline lane bias (≈ roadHalf/2)
+const TRACK_LAMBDA   = 4;     // exponential approach rate for heading → road axis
+const LANE_LAMBDA    = 2.2;   // gentler approach for the lateral lane-centering nudge
+// intersections sit where an X-road and a Z-road cross (block corners). Cars slow
+// on approach and may commit to a 90° turn there (gated by the existing turnCd).
+const ISECT_SLOW_R   = 7;     // m — start slowing within this of an intersection center
+const ISECT_SLOW_MUL = 0.55;  // speed scale while creeping through an intersection
+// brake for soft targets ahead (player + peds) in the forward cone
+const PED_BRAKE_R    = 5.5;   // m — peds within this (and ahead) trigger a brake
+const PED_BRAKE_R_SQ = PED_BRAKE_R * PED_BRAKE_R;
+const PED_BRAKE_DOT  = 0.6;   // cos of the half-cone for soft targets ahead
 const COLORS = [0x9aa0a6, 0x2f6f8f, 0xb5432e, 0xece8df, 0x3a3f4a, 0x2b6b3a, 0xc8a24a];
 
 const traffic = {
@@ -45,6 +58,7 @@ const traffic = {
   _spawnT: 0,
   _rng: null,
   _built: false,
+  _road: null,        // reusable scratch for world.nearestRoad(x,z,out) — no per-frame alloc
 
   init(ctx) {
     this._ctx = ctx;
@@ -120,13 +134,14 @@ const traffic = {
     const v = tc.v, pos = v.pos;
     if (GU.dist2D(pos.x, pos.z, px, pz) > RECYCLE_DIST) { this._recycle(tc, world, px, pz); return; }
 
-    const fx = Math.sin(tc.heading), fz = Math.cos(tc.heading);
     let speed = tc.speed;
+    const fleeing = tc.fleeT > 0;
 
     // FLEE: while panicking, floor it and steer the heading away from the event,
     // then decay the panic back to cruising. Steering nudges heading toward the
-    // away-vector before it snaps to the road axis on the next turn.
-    if (tc.fleeT > 0) {
+    // away-vector before it snaps to the road axis on the next turn. Flee wins
+    // over lane-following so a scared car will cut across the grid to escape.
+    if (fleeing) {
       tc.fleeT -= dt;
       speed = tc.speed * FLEE_SPEED_MUL;
       const ax = pos.x - tc.fleeX, az = pos.z - tc.fleeZ;
@@ -134,10 +149,72 @@ const traffic = {
         const away = Math.atan2(ax, az);
         tc.heading = GU.lerpAngle(tc.heading, away, Math.min(1, dt * 3));
       }
+    } else if (world && world.nearestRoad) {
+      // ROAD-GRID LANE FOLLOWING: snap the *intent* onto the road axis at the car
+      // and bias toward the right-hand lane, then ease the heading there with a
+      // shortest-arc lerp so the car tracks the grid smoothly instead of snapping.
+      // Guarded on world.nearestRoad so the headless stub (or a world without it)
+      // simply skips this and the car cruises on its existing heading.
+      const r = this._road || (this._road = {});
+      world.nearestRoad(pos.x, pos.z, r);
+      // the road runs along Z (dir≈0) or X (dir≈PI/2); pick the travel direction
+      // (forward / reverse along that axis) that best matches the current heading.
+      const axis = (Math.abs((r.dir || 0) - HALF) < 0.1) ? HALF : 0;
+      const afx = Math.sin(axis), afz = Math.cos(axis);
+      const cfx = Math.sin(tc.heading), cfz = Math.cos(tc.heading);
+      const sign = (cfx * afx + cfz * afz) >= 0 ? 1 : -1;
+      const tfx = afx * sign, tfz = afz * sign;     // unit travel direction on the road
+      // right-hand lane: offset the centerline laterally to the car's right
+      // (right of travel = travel vector rotated -90° → (fz, -fx)).
+      const rgtx = tfz, rgtz = -tfx;
+      let targetHeading = Math.atan2(tfx, tfz);
+      // lateral correction: how far off the (lane-offset) centerline are we?
+      // r.x/r.z is the centerline point; the lane sits LANE_OFFSET to its right.
+      const laneX = r.x + rgtx * LANE_OFFSET, laneZ = r.z + rgtz * LANE_OFFSET;
+      const offX = laneX - pos.x, offZ = laneZ - pos.z;
+      // project the lateral error onto the right vector → signed distance off-lane,
+      // and fold a small steering correction toward the lane into the target heading.
+      const lat = offX * rgtx + offZ * rgtz;
+      const corr = GU.clamp(lat * 0.25, -0.6, 0.6);   // radians of steer toward lane
+      targetHeading += corr;
+      tc.heading = GU.lerpAngle(tc.heading, targetHeading, 1 - Math.exp(-TRACK_LAMBDA * dt));
+      // gentle direct lateral pull so cars settle into the lane even on a straightaway
+      const pull = 1 - Math.exp(-LANE_LAMBDA * dt);
+      pos.x += offX * pull * 0.5; pos.z += offZ * pull * 0.5;
+
+      // INTERSECTION HANDLING: an intersection center is a block corner where both
+      // an X-road and a Z-road cross — i.e. both coords are near a grid line. Slow
+      // on approach; if a turn is due (turnCd elapsed) commit to a 90° turn here so
+      // the car turns AT the junction and doesn't jitter mid-block.
+      const bs = (world.blockSize || 24), off = (world.roadOffset != null ? world.roadOffset : 12);
+      const dgx = Math.abs(((pos.x - off) % bs + bs * 1.5) % bs - bs * 0.5);
+      const dgz = Math.abs(((pos.z - off) % bs + bs * 1.5) % bs - bs * 0.5);
+      if (dgx < ISECT_SLOW_R && dgz < ISECT_SLOW_R) {
+        speed *= ISECT_SLOW_MUL;            // creep through the junction
+        if (tc.turnCd <= 0) { this._turn(tc, world, pos); tc.turnCd = GU.rand(this._rng, 3, 7); }
+      }
     }
+
+    const fx = Math.sin(tc.heading), fz = Math.cos(tc.heading);
 
     // brake if the player is close ahead (cheap collision-avoidance)
     if (GU.dist2D(pos.x + fx * 4, pos.z + fz * 4, px, pz) < 3.5) speed *= 0.2;
+
+    // BRAKE FOR PEDS: peds are mirrored into ctx.targets by the bridge (kind:'ped');
+    // brake for any live one sitting close ahead in the forward cone. Sourced from
+    // ctx.targets (no global) so it's a cheap no-op in the headless stub (empty list).
+    const targets = this._ctx && this._ctx.targets;
+    if (targets && targets.length) {
+      for (const t of targets) {
+        if (!t || t.kind !== 'ped' || t.dead || !t.pos) continue;
+        const dx = t.pos.x - pos.x, dz = t.pos.z - pos.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > PED_BRAKE_R_SQ || d2 < 1e-6) continue;
+        const inv = 1 / Math.sqrt(d2);
+        if ((dx * inv) * fx + (dz * inv) * fz <= PED_BRAKE_DOT) continue;  // not ahead
+        speed *= 0.15; break;               // someone on foot ahead → brake hard
+      }
+    }
 
     // CAR-TO-CAR AVOIDANCE: brake (and lightly steer off) any live car sitting in
     // a short forward cone. O(n^2) over ~16 cars — cheap and headless-safe.
@@ -162,9 +239,14 @@ const traffic = {
     if (world && world.resolve) world.resolve(pos, 1.4);
     else { pos.x = GU.clamp(pos.x, -118, 118); pos.z = GU.clamp(pos.z, -118, 118); }
 
-    // blocked (building/edge ate the move) or a turn is due → pick a new road axis
+    // pick a new road axis when BLOCKED (a building/edge ate the move). When NOT
+    // road-following (no world / fleeing) also turn on the timer so cars still
+    // wander; while road-following, turns are committed AT intersections (above)
+    // so a mid-block timer turn doesn't fight the lane-follower and jitter.
     tc.turnCd -= dt;
-    if (GU.dist2D(pos.x, pos.z, bx, bz) < speed * dt * 0.4 || tc.turnCd <= 0) {
+    const blocked = GU.dist2D(pos.x, pos.z, bx, bz) < speed * dt * 0.4;
+    const roadFollowing = !fleeing && world && world.nearestRoad;
+    if (blocked || (!roadFollowing && tc.turnCd <= 0)) {
       this._turn(tc, world, pos);
       tc.turnCd = GU.rand(this._rng, 3, 7);
     }
