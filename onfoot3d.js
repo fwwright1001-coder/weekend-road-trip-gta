@@ -383,54 +383,63 @@ function buildPerson(colors, armed) {
     anchor.position.set(0.22, 1.29, 0.30);            // right-hand hold point
     g.add(anchor);
     const METAL = 0x202227, METAL2 = 0x33373d, WOOD = 0x5a3a1f, POLY = 0x141418;
+    const CHROME = 0xc8ccd2, WALNUT = 0x2a1a10;   // mob-piece nickel/chrome + dark-walnut grips
     const weapons = {};
     const addWeapon = (id, build) => {
       const w = new THREE.Group();
       const mz = new THREE.Object3D();
-      build(w, mz);
-      w.add(mz); w.userData.muzzle = mz; w.visible = false;
+      const ej = new THREE.Object3D();        // ejection port (gun's RIGHT, at the breech) for casing FX
+      build(w, mz, ej);
+      w.add(mz); w.add(ej);
+      w.userData.muzzle = mz; w.userData.eject = ej; w.visible = false;
       anchor.add(w); weapons[id] = w; return w;
     };
 
-    // FISTS — no mesh; muzzle just past the knuckles so melee FX has a spot
-    addWeapon('fists', (w, mz) => { mz.position.set(0, 0, 0.18); });
+    // FISTS — no mesh; muzzle just past the knuckles so melee FX has a spot (eject unused)
+    addWeapon('fists', (w, mz, ej) => { mz.position.set(0, 0, 0.18); ej.position.set(0, 0, 0.05); });
 
-    // PISTOL — slide + short barrel + angled grip
-    addWeapon('pistol', (w, mz) => {
-      w.add(mk(new THREE.BoxGeometry(0.07, 0.085, 0.26), METAL, 0.4));
-      const br = mk(new THREE.CylinderGeometry(0.018, 0.018, 0.08, 8), METAL2, 0.35); br.rotation.x = Math.PI / 2; br.position.set(0, 0.012, 0.17); w.add(br);
-      const grip = mk(new THREE.BoxGeometry(0.06, 0.15, 0.085), POLY, 0.5); grip.position.set(0, -0.11, -0.055); grip.rotation.x = 0.22; w.add(grip);
-      mz.position.set(0, 0.012, 0.225);
+    // PISTOL — chrome/nickel mob 1911: bright slide + barrel, dark-walnut grip, hammer nub
+    addWeapon('pistol', (w, mz, ej) => {
+      w.add(mk(new THREE.BoxGeometry(0.07, 0.085, 0.26), CHROME, 0.22));
+      const br = mk(new THREE.CylinderGeometry(0.018, 0.018, 0.08, 8), CHROME, 0.22); br.rotation.x = Math.PI / 2; br.position.set(0, 0.012, 0.17); w.add(br);
+      const grip = mk(new THREE.BoxGeometry(0.06, 0.15, 0.085), WALNUT, 0.5); grip.position.set(0, -0.11, -0.055); grip.rotation.x = 0.22; w.add(grip);
+      const hammer = mk(new THREE.BoxGeometry(0.02, 0.03, 0.03), CHROME, 0.2); hammer.position.set(0, 0.05, -0.115); w.add(hammer);
+      mz.position.set(0, 0.012, 0.225); ej.position.set(0.045, 0.035, 0.04);
     });
 
     // AK-47 — long receiver, wood foregrip + stock, curved magazine, front sight
-    addWeapon('ak47', (w, mz) => {
+    addWeapon('ak47', (w, mz, ej) => {
       w.add(mk(new THREE.BoxGeometry(0.06, 0.07, 0.5), METAL, 0.4));
       const fore = mk(new THREE.BoxGeometry(0.062, 0.072, 0.16), WOOD, 0.7); fore.position.set(0, 0, 0.17); w.add(fore);
       const mag = mk(new THREE.BoxGeometry(0.05, 0.21, 0.10), 0x2a2a30, 0.5); mag.position.set(0, -0.14, -0.02); mag.rotation.x = -0.45; w.add(mag);
       const grip = mk(new THREE.BoxGeometry(0.05, 0.13, 0.07), POLY, 0.5); grip.position.set(0, -0.10, -0.16); grip.rotation.x = 0.3; w.add(grip);
       const stock = mk(new THREE.BoxGeometry(0.05, 0.075, 0.22), WOOD, 0.7); stock.position.set(0, -0.02, -0.34); w.add(stock);
       const sight = mk(new THREE.BoxGeometry(0.012, 0.045, 0.02), METAL2, 0.4); sight.position.set(0, 0.06, 0.22); w.add(sight);
-      mz.position.set(0, 0.0, 0.42);
+      mz.position.set(0, 0.0, 0.42); ej.position.set(0.04, 0.035, 0.0);
     });
 
-    // SMG — compact body, straight mag, short folding stock stub
-    addWeapon('smg', (w, mz) => {
-      w.add(mk(new THREE.BoxGeometry(0.06, 0.09, 0.30), METAL, 0.4));
-      const mag = mk(new THREE.BoxGeometry(0.045, 0.18, 0.07), 0x2a2a30, 0.5); mag.position.set(0, -0.13, 0.02); w.add(mag);
-      const grip = mk(new THREE.BoxGeometry(0.05, 0.12, 0.07), POLY, 0.5); grip.position.set(0, -0.10, -0.10); grip.rotation.x = 0.25; w.add(grip);
-      const stock = mk(new THREE.BoxGeometry(0.04, 0.05, 0.14), METAL2, 0.45); stock.position.set(0, 0, -0.24); w.add(stock);
-      mz.position.set(0, 0.012, 0.26);
+    // SMG — Thompson "Tommy gun": wood receiver/grips, signature round DRUM mag, finned barrel
+    addWeapon('smg', (w, mz, ej) => {
+      w.add(mk(new THREE.BoxGeometry(0.07, 0.085, 0.34), WALNUT, 0.5));                                 // wood receiver
+      const drum = mk(new THREE.CylinderGeometry(0.105, 0.105, 0.06, 18), METAL2, 0.4); drum.rotation.z = Math.PI / 2; drum.position.set(0, -0.12, 0.03); w.add(drum);  // round drum, broad face to the SIDE (axis along X)
+      const drumCap = mk(new THREE.CylinderGeometry(0.03, 0.03, 0.07, 10), CHROME, 0.22); drumCap.rotation.z = Math.PI / 2; drumCap.position.set(0, -0.12, 0.03); w.add(drumCap);
+      const foreGrip = mk(new THREE.BoxGeometry(0.05, 0.11, 0.06), WOOD, 0.6); foreGrip.position.set(0, -0.10, 0.16); foreGrip.rotation.x = -0.05; w.add(foreGrip);
+      const rearGrip = mk(new THREE.BoxGeometry(0.05, 0.12, 0.07), WOOD, 0.6); rearGrip.position.set(0, -0.10, -0.12); rearGrip.rotation.x = 0.25; w.add(rearGrip);
+      const stock = mk(new THREE.BoxGeometry(0.05, 0.07, 0.16), WOOD, 0.7); stock.position.set(0, -0.01, -0.28); w.add(stock);
+      const barrel = mk(new THREE.CylinderGeometry(0.02, 0.02, 0.12, 10), METAL2, 0.4); barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.02, 0.21); w.add(barrel);
+      for (const fz of [0.18, 0.23]) { const fin = mk(new THREE.TorusGeometry(0.03, 0.008, 6, 10), METAL2, 0.4); fin.position.set(0, 0.02, fz); w.add(fin); }  // cooling fins wrap the +Z barrel
+      const sight = mk(new THREE.BoxGeometry(0.012, 0.04, 0.02), METAL2, 0.4); sight.position.set(0, 0.07, 0.24); w.add(sight);
+      mz.position.set(0, 0.02, 0.30); ej.position.set(0.045, 0.03, 0.05);
     });
 
     // SHOTGUN — thick barrel + pump under it, receiver, wood grip + stock
-    addWeapon('shotgun', (w, mz) => {
+    addWeapon('shotgun', (w, mz, ej) => {
       const barrel = mk(new THREE.CylinderGeometry(0.028, 0.028, 0.5, 10), METAL, 0.35); barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.03, 0.16); w.add(barrel);
       const pump = mk(new THREE.BoxGeometry(0.06, 0.05, 0.16), POLY, 0.6); pump.position.set(0, -0.04, 0.12); w.add(pump);
       const recv = mk(new THREE.BoxGeometry(0.06, 0.08, 0.18), METAL, 0.4); recv.position.set(0, 0, -0.06); w.add(recv);
       const grip = mk(new THREE.BoxGeometry(0.05, 0.11, 0.07), WOOD, 0.7); grip.position.set(0, -0.09, -0.12); grip.rotation.x = 0.3; w.add(grip);
       const stock = mk(new THREE.BoxGeometry(0.05, 0.09, 0.22), WOOD, 0.7); stock.position.set(0, -0.01, -0.30); w.add(stock);
-      mz.position.set(0, 0.03, 0.42);
+      mz.position.set(0, 0.03, 0.42); ej.position.set(0.045, 0.0, -0.04);
     });
 
     // arm poses per weapon family — [rotX,rotY,rotZ] + [posX,posY,posZ]; the gun
@@ -446,6 +455,7 @@ function buildPerson(colors, armed) {
       if (!weapons[id]) id = 'pistol';
       for (const k in weapons) weapons[k].visible = (k === id);
       g.userData.muzzle = weapons[id].userData.muzzle;
+      g.userData.eject = weapons[id].userData.eject;   // casing-eject port for the equipped weapon
       g.userData.gun = weapons[id];
       g.userData.weapon = id;
       const p = POSE[id] || POSE.pistol;
@@ -598,12 +608,14 @@ function buildBuilding(rng) {
   return { mesh: g, w, d, h };
 }
 
-// A drivable car (simplified from render3d's buildCar). Faces -Z at heading 0
-// per the convention that +Z is "forward" — but the driving model integrates
-// position along (sin h, cos h), so we orient the body so its nose points that
-// way: the model's nose is -Z, so we add the wheels and let rotation.y = heading
-// spin the whole group (nose ends up along +forward; cosmetic only).
-// Returns { group, wheels[] }. wheels[0..1] front, [2..3] rear (for steer/spin).
+// A drivable low-poly Italian supercar (Ferrari/Lambo wedge). Built NOSE-FORWARD:
+// its nose points +Z at heading 0, which is the driving model's forward direction
+// (updateDriving integrates position along (sin h, cos h) = +Z at heading 0 and only
+// applies rotation.y = heading). So the car drives the way it points — no rotation
+// hack, the orientation lives in the mesh. (Round-1's car built the nose at -Z, which
+// is exactly why it drove backward; this is the mesh-side fix.)
+// Returns { group, wheels[4], steerPivots[2] }. wheels[0..1] = FRONT (+Z, steered),
+// [2..3] = REAR (-Z). spawnVehicle + updateDriving depend on this exact shape.
 function buildCarMesh(bodyColor) {
   const g = new THREE.Group();
   const PI = Math.PI;
@@ -642,52 +654,74 @@ function buildCarMesh(bodyColor) {
     }
   }
 
-  // nose is -Z, tail is +Z (matches headlights at -Z, taillights at +Z)
-  // --- main painted hull: rounded capsule core (sides/nose/tail curved) ---
-  const hull = softHull(1.96, 0.74, 4.0, body, 16); hull.position.y = 0.7;
-  // belt-line filler box keeps a solid silhouette under the capsule curve
-  const belt = new THREE.Mesh(new THREE.BoxGeometry(1.82, 0.42, 3.62), body); belt.position.y = 0.62;
-  // sloped hood + trunk give the long curved profile
-  const hood = new THREE.Mesh(new THREE.BoxGeometry(1.78, 0.26, 1.5), body); hood.position.set(0, 0.96, -1.22); hood.rotation.x = -0.1;
-  const trunk = new THREE.Mesh(new THREE.BoxGeometry(1.82, 0.3, 1.1), body); trunk.position.set(0, 0.95, 1.42); trunk.rotation.x = 0.09;
+  // nose is +Z (headlights/grille/splitter at +Z), tail is -Z (taillights/wing/diffuser at -Z);
+  // matches the driving model forward = (sin h, cos h) = +Z at heading 0, so the car drives nose-first.
+  // ---- low Italian-supercar wedge: bright pinched nose (+Z), fat glowing-quad tail (-Z) ----
 
-  // --- curved cabin / greenhouse: capsule roof (rounded) over a tapered base ---
-  const cabinBase = new THREE.Mesh(new THREE.BoxGeometry(1.72, 0.5, 1.96), body); cabinBase.position.set(0, 1.06, 0.06);
-  const roof = softHull(1.52, 0.5, 1.78, body, 12); roof.position.set(0, 1.4, 0.12);
-  // A-pillar / windshield-frame chamfer fillers to soften the cabin-to-hood join
-  const cowl = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.2, 0.34), body); cowl.position.set(0, 1.14, -0.86); cowl.rotation.x = -0.45;
+  // main painted capsule core (sides/nose/tail curved) + belt-line filler + underbody
+  const hull = softHull(1.96, 0.74, 4.0, body, 16); hull.position.y = 0.70;
+  const belt = new THREE.Mesh(new THREE.BoxGeometry(1.82, 0.42, 3.5), body); belt.position.set(0, 0.62, 0);
+  const underTray = new THREE.Mesh(new THREE.BoxGeometry(1.86, 0.2, 3.3), dark); underTray.position.y = 0.40;
 
-  // --- rockers / lower side cladding + underbody ---
-  const rockerL = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.24, 3.0), trim); rockerL.position.set(-0.96, 0.46, 0.05);
-  const rockerR = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.24, 3.0), trim); rockerR.position.set(0.96, 0.46, 0.05);
-  const underTray = new THREE.Mesh(new THREE.BoxGeometry(1.86, 0.2, 3.3), dark); underTray.position.y = 0.4;
+  // low ramped front clip + hood dropping toward the +Z knife nose; long engine deck at -Z
+  const noseWedge = new THREE.Mesh(new THREE.BoxGeometry(1.78, 0.30, 1.3), body); noseWedge.position.set(0, 0.56, 1.5); noseWedge.rotation.x = 0.18;
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.18, 1.0), body); hood.position.set(0, 0.78, 1.0); hood.rotation.x = 0.06;
+  const rearDeck = new THREE.Mesh(new THREE.BoxGeometry(1.80, 0.28, 1.25), body); rearDeck.position.set(0, 0.95, -1.30); rearDeck.rotation.x = -0.07;
 
-  // --- glass: curved windshield, rear glass, side windows (physical, transparent) ---
-  const wind = new THREE.Mesh(new THREE.BoxGeometry(1.46, 0.5, 0.05), glass); wind.position.set(0, 1.32, -0.7); wind.rotation.x = -0.46;
-  const rearGlass = new THREE.Mesh(new THREE.BoxGeometry(1.46, 0.44, 0.05), glass); rearGlass.position.set(0, 1.32, 0.9); rearGlass.rotation.x = 0.46;
-  const sideGlassL = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.32, 1.46), glass); sideGlassL.position.set(-0.78, 1.34, 0.12);
-  const sideGlassR = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.32, 1.46), glass); sideGlassR.position.set(0.78, 1.34, 0.12);
+  // cab-forward greenhouse: rounded roof capsule over a tapered base, biased +Z
+  const cabinBase = new THREE.Mesh(new THREE.BoxGeometry(1.70, 0.5, 1.9), body); cabinBase.position.set(0, 1.04, 0.30);
+  const roof = softHull(1.50, 0.48, 1.6, body, 12); roof.position.set(0, 1.38, 0.10);
+  const cowl = new THREE.Mesh(new THREE.BoxGeometry(1.58, 0.18, 0.32), body); cowl.position.set(0, 1.12, 0.78); cowl.rotation.x = 0.45;
 
-  // --- front face: grille + rounded headlights (sphere base + clear lens) ---
-  const grille = new THREE.Mesh(new THREE.BoxGeometry(1.08, 0.26, 0.06), grilleMat); grille.position.set(0, 0.68, -2.0);
-  const grilleBar1 = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.022, 6, 20, PI), chrome); grilleBar1.position.set(0, 0.74, -2.0); grilleBar1.rotation.z = PI; grilleBar1.scale.set(1.05, 0.32, 1);
-  const hl1 = new THREE.Mesh(new THREE.SphereGeometry(0.16, 14, 10), lamp); hl1.position.set(-0.66, 0.78, -1.98); hl1.scale.set(1.3, 0.78, 0.6);
-  const hl2 = new THREE.Mesh(new THREE.SphereGeometry(0.16, 14, 10), lamp); hl2.position.set(0.66, 0.78, -1.98); hl2.scale.set(1.3, 0.78, 0.6);
-  const hlLensL = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 8), lensMat); hlLensL.position.set(-0.66, 0.78, -2.0); hlLensL.scale.set(1.3, 0.8, 0.45);
-  const hlLensR = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 8), lensMat); hlLensR.position.set(0.66, 0.78, -2.0); hlLensR.scale.set(1.3, 0.8, 0.45);
+  // --- rockers / side skirts ---
+  const rockerL = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.24, 3.0), trim); rockerL.position.set(-0.96, 0.46, 0.05);
+  const rockerR = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.24, 3.0), trim); rockerR.position.set(0.96, 0.46, 0.05);
 
-  // --- rear face: rounded tail lights (emissive) + chrome strip ---
-  const tl1 = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 8), tail); tl1.position.set(-0.64, 0.82, 1.98); tl1.scale.set(1.5, 0.85, 0.5);
-  const tl2 = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 8), tail); tl2.position.set(0.64, 0.82, 1.98); tl2.scale.set(1.5, 0.85, 0.5);
-  const tlBar = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.04, 0.05), chrome); tlBar.position.set(0, 0.82, 2.0);
+  // --- glass: steeply raked windshield (+Z front of cabin), rear engine louver (-Z), side windows ---
+  const wind = new THREE.Mesh(new THREE.BoxGeometry(1.44, 0.5, 0.05), glass); wind.position.set(0, 1.30, 0.95); wind.rotation.x = 0.50;
+  const rearGlass = new THREE.Mesh(new THREE.BoxGeometry(1.44, 0.42, 0.05), glass); rearGlass.position.set(0, 1.30, -0.45); rearGlass.rotation.x = -0.46;
+  const sideGlassL = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.30, 1.30), glass); sideGlassL.position.set(-0.78, 1.34, 0.20);
+  const sideGlassR = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.30, 1.30), glass); sideGlassR.position.set(0.78, 1.34, 0.20);
 
-  // --- rounded bumpers (capsule-profile) + chrome lips ---
-  const bumperF = softHull(1.94, 0.26, 0.34, trim, 8); bumperF.position.set(0, 0.46, -2.0);
-  const bumperFlip = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.05, 0.08), chrome); bumperFlip.position.set(0, 0.36, -2.08);
-  const bumperR = softHull(1.94, 0.26, 0.34, trim, 8); bumperR.position.set(0, 0.46, 2.0);
-  const bumperRlip = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.05, 0.08), chrome); bumperRlip.position.set(0, 0.36, 2.08);
+  // --- FRONT FACE (+Z): slot grille + chrome lip, black splitter, slim swept headlights, nose lip, hex intakes ---
+  const slotGrille = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.22, 0.06), grilleMat); slotGrille.position.set(0, 0.60, 2.0);
+  const grilleLip = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.022, 6, 20, PI), chrome); grilleLip.position.set(0, 0.66, 2.0); grilleLip.rotation.z = PI; grilleLip.scale.set(1.05, 0.32, 1);
+  const splitter = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.06, 0.40), trim); splitter.position.set(0, 0.40, 2.04);
+  const hl1 = new THREE.Mesh(new THREE.SphereGeometry(0.16, 14, 10), lamp); hl1.position.set(-0.66, 0.74, 1.98); hl1.scale.set(1.4, 0.55, 0.6);
+  const hl2 = new THREE.Mesh(new THREE.SphereGeometry(0.16, 14, 10), lamp); hl2.position.set(0.66, 0.74, 1.98); hl2.scale.set(1.4, 0.55, 0.6);
+  const hlLensL = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 8), lensMat); hlLensL.position.set(-0.66, 0.74, 2.0); hlLensL.scale.set(1.4, 0.58, 0.45);
+  const hlLensR = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 8), lensMat); hlLensR.position.set(0.66, 0.74, 2.0); hlLensR.scale.set(1.4, 0.58, 0.45);
+  const noseLip = softHull(1.5, 0.20, 0.5, body, 8); noseLip.position.set(0, 0.55, 2.05);
+  const intakeL = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.18, 0.06), grilleMat); intakeL.position.set(-0.62, 0.42, 2.04);
+  const intakeR = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.18, 0.06), grilleMat); intakeR.position.set(0.62, 0.42, 2.04);
 
-  // --- pronounced wheel arches (torus flares) over each wheel ---
+  // --- REAR FACE (-Z): quad round emissive taillights + surround + chrome strip, diffuser fins, big wing ---
+  const tlGeo = new THREE.SphereGeometry(0.115, 12, 10);
+  const tl1 = new THREE.Mesh(tlGeo, tail); tl1.position.set(-0.62, 0.86, -1.98); tl1.scale.set(1, 1, 0.5);
+  const tl2 = new THREE.Mesh(tlGeo, tail); tl2.position.set(-0.34, 0.86, -1.98); tl2.scale.set(1, 1, 0.5);
+  const tl3 = new THREE.Mesh(tlGeo, tail); tl3.position.set(0.34, 0.86, -1.98); tl3.scale.set(1, 1, 0.5);
+  const tl4 = new THREE.Mesh(tlGeo, tail); tl4.position.set(0.62, 0.86, -1.98); tl4.scale.set(1, 1, 0.5);
+  const tlSurround = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.32, 0.05), dark); tlSurround.position.set(0, 0.84, -2.0);
+  const tlBar = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.04, 0.05), chrome); tlBar.position.set(0, 0.86, -2.03);  // proud of the surround (no coplanar z-fight)
+  const diffuser = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.22, 0.30), dark); diffuser.position.set(0, 0.42, -1.95);
+  const fins = [];
+  // chrome strakes that PROTRUDE past the diffuser face so the channels actually read (not buried in same-color block)
+  for (const fxp of [-0.45, -0.15, 0.15, 0.45]) { const fin = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.20, 0.22), chrome); fin.position.set(fxp, 0.40, -2.12); fins.push(fin); }
+  const wingPostL = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.30, 0.06), trim); wingPostL.position.set(-0.55, 1.05, -1.80);
+  const wingPostR = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.30, 0.06), trim); wingPostR.position.set(0.55, 1.05, -1.80);
+  const wingBlade = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.06, 0.42), body); wingBlade.position.set(0, 1.22, -1.85); wingBlade.rotation.x = -0.12;
+
+  // --- rounded bumpers (front +Z, rear -Z) ---
+  const bumperF = softHull(1.92, 0.24, 0.32, trim, 8); bumperF.position.set(0, 0.44, 2.0);
+  const bumperR = softHull(1.92, 0.24, 0.32, trim, 8); bumperR.position.set(0, 0.44, -2.0);
+
+  // --- wide rear haunches (widest point) + side scoops ahead of the rear wheels ---
+  const haunchL = softHull(0.5, 0.5, 1.2, body, 10); haunchL.position.set(-0.92, 0.78, -1.1);
+  const haunchR = softHull(0.5, 0.5, 1.2, body, 10); haunchR.position.set(0.92, 0.78, -1.1);
+  const sideIntakeL = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.22, 0.5), dark); sideIntakeL.position.set(-0.98, 0.74, -0.6); sideIntakeL.rotation.y = 0.1;
+  const sideIntakeR = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.22, 0.5), dark); sideIntakeR.position.set(0.98, 0.74, -0.6); sideIntakeR.rotation.y = -0.1;
+
+  // --- pronounced wheel arches (torus flares); fronts at +Z to match the nose ---
   function makeArch(x, z) {
     const arch = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.1, 8, 18, PI), trim);
     arch.position.set(x, 0.56, z);
@@ -695,14 +729,14 @@ function buildCarMesh(bodyColor) {
     arch.scale.set(1, 1, 0.55);        // flatten against the flank
     return arch;
   }
-  const archFL = makeArch(-0.99, -1.4), archFR = makeArch(0.99, -1.4);
-  const archRL = makeArch(-0.99, 1.45), archRR = makeArch(0.99, 1.45);
+  const archFL = makeArch(-0.99, 1.45), archFR = makeArch(0.99, 1.45);
+  const archRL = makeArch(-0.99, -1.45), archRR = makeArch(0.99, -1.45);
 
-  // --- side mirrors (rounded pods) ---
-  const mirrorL = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), body); mirrorL.position.set(-1.04, 1.14, -0.5); mirrorL.scale.set(1, 0.85, 1.3);
-  const mirrorR = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), body); mirrorR.position.set(1.04, 1.14, -0.5); mirrorR.scale.set(1, 0.85, 1.3);
-  const mirrorLglass = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.08, 0.13), glass); mirrorLglass.position.set(-1.12, 1.14, -0.5);
-  const mirrorRglass = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.08, 0.13), glass); mirrorRglass.position.set(1.12, 1.14, -0.5);
+  // --- side mirrors (rounded pods near the cabin front, +Z) ---
+  const mirrorL = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), body); mirrorL.position.set(-1.04, 1.14, 0.50); mirrorL.scale.set(1, 0.85, 1.3);
+  const mirrorR = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), body); mirrorR.position.set(1.04, 1.14, 0.50); mirrorR.scale.set(1, 0.85, 1.3);
+  const mirrorLglass = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.08, 0.13), glass); mirrorLglass.position.set(-1.12, 1.14, 0.50);
+  const mirrorRglass = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.08, 0.13), glass); mirrorRglass.position.set(1.12, 1.14, 0.50);
 
   // --- chrome belt-line trim + door-seam hints on each flank ---
   const beltTrimL = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.03, 2.4), chrome); beltTrimL.position.set(-0.95, 0.92, 0.1);
@@ -711,11 +745,12 @@ function buildCarMesh(bodyColor) {
   const seamR = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.4, 0.025), trim); seamR.position.set(0.96, 0.74, 0.55);
 
   g.add(
-    underTray, belt, hull, hood, trunk, cabinBase, roof, cowl, rockerL, rockerR,
+    underTray, belt, hull, noseWedge, hood, rearDeck, cabinBase, roof, cowl, rockerL, rockerR,
     wind, rearGlass, sideGlassL, sideGlassR,
-    grille, grilleBar1, hl1, hl2, hlLensL, hlLensR,
-    tl1, tl2, tlBar,
-    bumperF, bumperFlip, bumperR, bumperRlip,
+    slotGrille, grilleLip, splitter, hl1, hl2, hlLensL, hlLensR, noseLip, intakeL, intakeR,
+    tl1, tl2, tl3, tl4, tlSurround, tlBar, diffuser, ...fins, wingPostL, wingPostR, wingBlade,
+    bumperF, bumperR,
+    haunchL, haunchR, sideIntakeL, sideIntakeR,
     archFL, archFR, archRL, archRR,
     mirrorL, mirrorR, mirrorLglass, mirrorRglass,
     beltTrimL, beltTrimR, seamL, seamR
@@ -747,9 +782,10 @@ function buildCarMesh(bodyColor) {
     return w;
   }
 
+  // FRONT wheels first (entries 0,1 at +Z = the steered nose) then REAR (wider track at -Z).
   const wheels = [], steerPivots = [];
   let wi = 0;
-  for (const [x, z] of [[-1.04, -1.4], [1.04, -1.4], [-1.04, 1.45], [1.04, 1.45]]) {
+  for (const [x, z] of [[-1.04, 1.45], [1.04, 1.45], [-1.10, -1.45], [1.10, -1.45]]) {
     const side = x < 0 ? -1 : 1;
     const w = makeWheel(side);
     if (wi < 2) {
@@ -765,7 +801,8 @@ function buildCarMesh(bodyColor) {
   return { group: g, wheels, steerPivots };
 }
 
-const CAR_COLORS = [0xd8392e, 0x2f6f8f, 0x394150, 0xb0b4ba, 0x2f7a45, 0xc9a24f, 0x7a3a8f, 0x202428];
+// Italian-supercar paint: rosso/giallo/arancio + a few exotics (verde, blu, bianco, nero).
+const CAR_COLORS = [0xd81e1e, 0xf2c200, 0xe65a10, 0x2fae5a, 0x2f6fd8, 0xdadde2, 0x202024, 0xb31313];
 // Build a car, register it as a drivable vehicle at (x,z) facing `heading`.
 function spawnVehicle(x, z, heading, color) {
   const { group, wheels, steerPivots } = buildCarMesh(color);
@@ -1000,12 +1037,12 @@ function ensureInit() {
 
   // drivable cars: the red convertible at the plaza + parked cars on the streets
   // (x=±12 / z=±12 sit in the cross-streets between the building blocks)
-  spawnVehicle(-1.2, 5.5, 0.2, 0xd8392e);   // your convertible, beside spawn
-  spawnVehicle(12, 2, Math.PI / 2, 0x2f6f8f);
-  spawnVehicle(-12, -4, 0, 0x394150);
-  spawnVehicle(2, 13, Math.PI, 0x2f7a45);
-  spawnVehicle(-12, 14, Math.PI / 2, 0xc9a24f);
-  spawnVehicle(12, -14, 0, 0x7a3a8f);
+  spawnVehicle(-1.2, 5.5, 0.2, 0xd81e1e);   // your ride: rosso corsa, beside spawn
+  spawnVehicle(12, 2, Math.PI / 2, 0xf2c200); // giallo
+  spawnVehicle(-12, -4, 0, 0xe65a10);         // arancio
+  spawnVehicle(2, 13, Math.PI, 0x2fae5a);     // verde
+  spawnVehicle(-12, 14, Math.PI / 2, 0x2f6fd8); // blu
+  spawnVehicle(12, -14, 0, 0xdadde2);         // bianco/silver
 
   // the player
   player.mesh = buildPerson({ skin: 0xd9a679, shirt: 0x2f6f8f, pants: 0x2b2b33, hair: 0x3a2a1a }, true);
