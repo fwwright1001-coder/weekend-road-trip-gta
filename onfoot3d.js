@@ -66,16 +66,28 @@ const CAR_CAM_HEIGHT = 4.6;  // chase-cam height
 const CAM = {
   followTau: 0.09,   // on-foot position smoothing (s)
   driveTau: 0.16,    // driving chase smoothing (s)
+  distTau: 0.12,     // on-foot camera-DISTANCE smoothing (s) — eases wall pull-in so it never pops
   fovBase: 62,       // base vertical FOV
+  fovRun: 67,        // FOV while sprinting on foot (subtle speed sensation)
+  fovAim: 50,        // FOV while aiming down (window.ONFOOT.aiming) — a zoomed, tighter shot
   fovDrive: 78,      // FOV at top car speed (sells velocity)
   fovTau: 0.30,      // FOV easing (s)
+  aimDist: 3.2,      // camera distance while aiming (pulls over-the-shoulder from CAM_DIST)
+  recoilDecay: 5.2,  // how fast the firing kick settles (units/s)
+  recoilLift: 1.7,   // camera rise per unit of recoil
+  recoilAim: 1.0,    // look-target rise per unit of recoil
 };
 let _camInit = false;                     // seed the smoothed position on first frame / after mode change
 const _camPos = new THREE.Vector3();      // smoothed camera position (on-foot)
+let _camDist = CAM_DIST;                  // smoothed third-person distance (wall pull-in + aim eased)
 let _curFov = CAM.fovBase;                // smoothed FOV
 if (typeof window !== 'undefined') window.ONFOOT_CAM = CAM;
 // frame-rate-independent smoothing factor for a given time-constant
 function camDamp(tau, dt) { return 1 - Math.exp(-dt / Math.max(0.0001, tau)); }
+// is the player aiming down? a shared, optional flag the systems layer (combat /
+// the bridge) can set on right-mouse; defaults false so on-foot behaviour is
+// unchanged when nothing sets it.
+function isAiming() { return typeof window !== 'undefined' && !!(window.ONFOOT && window.ONFOOT.aiming); }
 const RUN_OVER_SPEED = 5;    // min speed to knock down a ped you drive into
 
 // ---- public handle ---------------------------------------------------------
@@ -129,24 +141,39 @@ const _fwd = new THREE.Vector3(), _right = new THREE.Vector3();
 let hudEl, ammoEl, killsEl, promptEl, toastEl, crosshairEl, speedEl, footStatsEl, driveStatsEl;
 let kills = 0;
 
-// tiny self-contained audio for the gun (never touches game.js's audio)
-let actx = null;
+// tiny self-contained audio for the gun (never touches game.js's audio).
+// Only used by onfoot3d's own legacy pistol; when the GTA systems layer owns
+// firing (OF.combatOwned), gta/fx.js carries the richer per-weapon reports.
+let actx = null, _gunNoise = null;
 function gunSound() {
   try {
     if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
     if (actx.state === 'suspended') actx.resume();   // recover from autoplay/tab-visibility suspension
     const t = actx.currentTime;
-    // short noise burst + low thump
-    const buf = actx.createBuffer(1, 1024, actx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 2);
-    const noise = actx.createBufferSource(); noise.buffer = buf;
-    const ng = actx.createGain(); ng.gain.setValueAtTime(0.35, t); ng.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
-    noise.connect(ng).connect(actx.destination); noise.start(t);
+    // reusable 0.4s white-noise buffer (one-shot sources read from it) — the gun
+    // report is layered: a bright HF crack + a chest thump + a short smoky tail.
+    if (!_gunNoise) {
+      const n = (actx.sampleRate * 0.4) | 0;
+      _gunNoise = actx.createBuffer(1, n, actx.sampleRate);
+      const nd = _gunNoise.getChannelData(0);
+      for (let i = 0; i < n; i++) nd[i] = Math.random() * 2 - 1;
+    }
+    const burst = (dur, gain, type, freq, q) => {
+      const src = actx.createBufferSource(); src.buffer = _gunNoise; src.loop = true;
+      src.playbackRate.value = 0.85 + Math.random() * 0.3;
+      const f = actx.createBiquadFilter(); f.type = type; f.frequency.value = freq; if (q != null) f.Q.value = q;
+      const g = actx.createGain();
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(gain, t + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      src.connect(f).connect(g).connect(actx.destination); src.start(t); src.stop(t + dur + 0.02);
+    };
+    burst(0.05, 0.42, 'highpass', 2400, 0.7);            // sharp crack
+    burst(0.09, 0.12, 'lowpass', 700, 0.4);              // smoky tail
     const osc = actx.createOscillator(); osc.type = 'square';
-    osc.frequency.setValueAtTime(180, t); osc.frequency.exponentialRampToValueAtTime(60, t + 0.1);
-    const og = actx.createGain(); og.gain.setValueAtTime(0.25, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
-    osc.connect(og).connect(actx.destination); osc.start(t); osc.stop(t + 0.13);
+    osc.frequency.setValueAtTime(320, t); osc.frequency.exponentialRampToValueAtTime(60, t + 0.1);
+    const og = actx.createGain(); og.gain.setValueAtTime(0.0001, t);
+    og.gain.exponentialRampToValueAtTime(0.3, t + 0.004); og.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+    osc.connect(og).connect(actx.destination); osc.start(t); osc.stop(t + 0.12);
   } catch (e) { /* audio is optional */ }
 }
 
@@ -1094,26 +1121,33 @@ function updateOnFoot(dt) {
 
   // --- camera: damped third-person orbit behind the player ---
   // Look direction stays LIVE off the mouse (aim feels crisp); only the camera's
-  // position eases toward its target, which is what reads as "smooth".
+  // position + distance ease toward their targets, which is what reads as "smooth".
+  const aiming = isAiming();
+  const running = !aiming && _vmag > 1.0 && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
   const cpz = Math.cos(pitch);
   _dir.set(Math.sin(yaw) * cpz, Math.sin(pitch), Math.cos(yaw) * cpz);
   const head = _v.copy(player.pos).setY(EYE);
-  // pull the camera in if its orbit point would sit inside a building (ease off walls, don't clip through)
-  let camDist = CAM_DIST;
+  // desired distance: pull over-the-shoulder when aiming, otherwise the orbit
+  // distance; then ease off any wall the orbit point would clip into.
+  let wantDist = aiming ? CAM.aimDist : CAM_DIST;
   for (let s = 0; s < 6; s++) {
-    if (!insideBuilding(head.x - _dir.x * camDist, head.z - _dir.z * camDist, 0.4)) break;
-    camDist -= 0.8; if (camDist < 1.2) { camDist = 1.2; break; }
+    if (!insideBuilding(head.x - _dir.x * wantDist, head.z - _dir.z * wantDist, 0.4)) break;
+    wantDist -= 0.8; if (wantDist < 1.2) { wantDist = 1.2; break; }
   }
-  const desiredCam = _v2.copy(head).addScaledVector(_dir, -camDist);
-  desiredCam.y += 0.4 + recoil * 2;
+  if (!_camInit) _camDist = wantDist;                                 // seed distance (no first-frame swoop)
+  _camDist += (wantDist - _camDist) * camDamp(CAM.distTau, dt);       // SMOOTH distance → walls no longer pop
+  const desiredCam = _v2.copy(head).addScaledVector(_dir, -_camDist);
+  desiredCam.y += 0.4 + recoil * CAM.recoilLift;
   if (desiredCam.y < 0.6) desiredCam.y = 0.6;
   if (!_camInit) { _camPos.copy(desiredCam); _camInit = true; }        // seed on first frame / after mode change (no swoop)
   _camPos.lerp(desiredCam, camDamp(CAM.followTau, dt));
   camera.position.copy(_camPos);
-  _curFov += (CAM.fovBase - _curFov) * camDamp(CAM.fovTau, dt);        // ease FOV back to base on foot
+  // FOV: base on foot, a touch wider while sprinting (speed), tighter while aiming (zoom wins)
+  const wantFov = aiming ? CAM.fovAim : (running ? CAM.fovRun : CAM.fovBase);
+  _curFov += (wantFov - _curFov) * camDamp(CAM.fovTau, dt);
   if (Math.abs(camera.fov - _curFov) > 0.02) { camera.fov = _curFov; camera.updateProjectionMatrix(); }
-  camera.lookAt(head.x + _dir.x, head.y + _dir.y + recoil, head.z + _dir.z);
-  recoil = Math.max(0, recoil - dt * 0.6);
+  camera.lookAt(head.x + _dir.x, head.y + _dir.y + recoil * CAM.recoilAim, head.z + _dir.z);
+  recoil = Math.max(0, recoil - dt * CAM.recoilDecay);
 }
 
 // ============================================================
