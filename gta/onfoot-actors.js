@@ -1,19 +1,21 @@
 // ============================================================
-// gta/onfoot-actors.js — rigged, animated character art for the on-foot mode.
+// gta/onfoot-actors.js — pedestrian character art for the on-foot mode.
 // ------------------------------------------------------------
-// Loads a single rigged humanoid (Soldier.glb — Idle/Walk/Run) once, then clones
-// it per character (SkeletonUtils, so each clone gets its own skeleton +
-// AnimationMixer). onfoot3d's buildPerson() uses this when ready and falls back
-// to its procedural box-person if not, so a missing asset can never crash.
+// ROUND 3: the only vendored rig (Soldier.glb) is the armoured Mixamo *Vanguard*
+// (a sci-fi SOLDIER — helmet/visor/armour as geometry, no textures), so per the
+// creator note "the soldier look is gone", makeActor() now returns an ORIGINAL
+// low-poly CIVILIAN (varied skin/hair/clothing + accessories) built procedurally
+// here. It honours the host's animateWalk contract: a THREE.Group, feet at origin,
+// ~1.8 tall, facing +Z, with userData.legL/legR/armL/armR (limb groups the host
+// swings about X). The player is NOT routed here — buildPerson only calls makeActor
+// for UNARMED peds; makeActor returns null for armed so buildPerson keeps the
+// gangster. So this file no longer produces a skeleton/mixer at runtime.
 //
-// ARMED actors (the player) also get a procedural GUN/AIM RIG: the gun is parented
-// to the right-hand bone, the right arm/forearm are posed into a weapon-ready
-// stance (with aim-pitch elevation), and each shot kicks a recoil that decays.
-// The bone angles are tunable LIVE via window.ONFOOT_AIM (dial them in-browser).
-//
-// Contract: makeActor() returns a THREE.Group (feet at origin, ~1.8 tall, facing
-// +Z) with userData.actor. Drive it with updateActor(actor, dt, { moving, running,
-// dead, pitch }). Recoil auto-fires off the 'gunfire' crime event.
+// The Soldier model loader (preloadActors) + the armed GUN/AIM rig below
+// (AIM/_applyAim/_armed/_wireBus/updateActor's armed branch) are RETAINED but
+// currently UNUSED at runtime — kept only so the offline aim-check/actor-check
+// tools still validate the asset, and so a future skeletal-civilian asset could
+// re-enable the rigged path. window.ONFOOT_AIM still tunes the (offline) rig.
 // ============================================================
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -135,89 +137,68 @@ function _addCivAccessories(g, sv) {
   }
 }
 
-// Build one character. Returns a Group (feet at origin, ~1.8 tall, facing +Z)
-// with userData.actor, or null if the model isn't ready (caller falls back).
-//   opts: { colorize?: hex, armed?: bool, scaleVar?: number }
-export function makeActor(opts = {}) {
-  if (!_ready || !_src) return null;
-  let inner;
-  try { inner = cloneSkinned(_src.scene); } catch (e) { return null; }
-
-  const s = _scale * (opts.scaleVar || 1);
-  inner.scale.setScalar(s);
-  inner.position.y = _footY * (opts.scaleVar || 1);
-  inner.rotation.y = FACING;
-
-  // per-actor tint + strength (hoisted so every material on one person agrees,
-  // and the crowd spreads across light/strong tints rather than all looking the same)
-  const tint = opts.colorize != null ? new THREE.Color(opts.colorize) : null;
-  const tintAmt = 0.42 + Math.random() * 0.32;
-  inner.traverse((o) => {
-    if (!o.isMesh) return;
-    o.castShadow = true; o.receiveShadow = true;
-    o.frustumCulled = false;
-    if (o.material) {
-      o.material = Array.isArray(o.material) ? o.material.map((m) => m.clone()) : o.material.clone();
-      if (tint) {
-        const mats = Array.isArray(o.material) ? o.material : [o.material];
-        for (const m of mats) if (m.color) m.color.lerp(tint, tintAmt);
-      }
-    }
-  });
-
+// ============================================================
+// CIVILIAN RESKIN (round 3) — the vendored rig is the Mixamo *Vanguard*: an
+// armoured sci-fi SOLDIER (helmet + visor + armour plates, all geometry, no
+// textures), so no amount of tinting makes a pedestrian read as a civilian. Per
+// the creator note ("the soldier look is gone"), pedestrians are now ORIGINAL
+// low-poly civilians built here — varied skin/hair/clothing, animated via the
+// host's procedural arm/leg swing (userData.legL/legR/armL/armR). The player is
+// unaffected: buildPerson only calls makeActor for UNARMED peds; the armed player
+// stays the procedural gangster buildPerson owns.
+// ============================================================
+const _civSkin = [0xf1c27d, 0xe0ac69, 0xc68642, 0x8d5524, 0xffdbac, 0xa9764a, 0xd9a679];
+const _civHair = [0x2a1a0f, 0x4a2f1a, 0x6b4a2e, 0x141414, 0x8a7a5a, 0x9a3a2a, 0xb8b8b8, 0x33291c];
+const _civShirt = [0xc94f4f, 0x4f7fc9, 0x4fae6b, 0xc9a24f, 0x8a4fc9, 0x3a8a8a, 0xb0683a, 0x4a4f57, 0xc97fae, 0x4fbfb0];
+const _civPants = [0x2b2b33, 0x3a3a45, 0x4a3b2a, 0x2f4150, 0x55504a, 0x3a2f2a, 0x6a6a72];
+function _buildCivilian(opts) {
   const g = new THREE.Group();
-  g.add(inner);
+  const sv = opts.scaleVar || 1;
+  const skin = _pickHex(_civSkin), hair = _pickHex(_civHair);
+  const shirt = opts.colorize != null ? opts.colorize : _pickHex(_civShirt);
+  const pants = _pickHex(_civPants), shoeCol = 0x222227;
+  const build = 0.9 + Math.random() * 0.32;
+  const mk = (geo, col, rough) => { const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: col, roughness: rough == null ? 0.85 : rough })); m.castShadow = true; m.receiveShadow = true; return m; };
+  const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
 
-  const mixer = new THREE.AnimationMixer(inner);
-  const actions = {};
-  for (const key in CLIPS) {
-    const clip = THREE.AnimationClip.findByName(_src.animations, CLIPS[key]);
-    if (clip) actions[key] = mixer.clipAction(clip);
-  }
-  const actor = { mixer, actions, current: null, dead: false, armed: false, recoil: 0, bones: null, gun: null, gunRestZ: 0 };
-  g.userData.actor = actor;
-  if (actions.idle) { actions.idle.play(); actor.current = 'idle'; }
-  // crowd believability: vary each walker's gait speed slightly and desync the
-  // cycle so a group of peds doesn't march in perfect lockstep.
-  mixer.timeScale = 0.86 + Math.random() * 0.3;
-  try { mixer.update(Math.random() * 1.6); } catch (e) { /* harmless if no clip */ }
+  // legs / arms are GROUPS pivoting at the hip / shoulder, so the host's
+  // animateWalk (which rotates userData.legL/legR/armL/armR about X) swings them.
+  const mkLeg = (sign) => {
+    const grp = new THREE.Group(); grp.position.set(sign * 0.12, 0.92, 0);
+    const leg = mk(box(0.18 * build, 0.84, 0.2 * build), pants); leg.position.y = -0.42; grp.add(leg);
+    const shoe = mk(box(0.19, 0.12, 0.32), shoeCol, 0.6); shoe.position.set(0, -0.86, 0.06); grp.add(shoe);
+    return grp;
+  };
+  const mkArm = (sign) => {
+    const grp = new THREE.Group(); grp.position.set(sign * 0.3 * build, 1.5, 0);
+    const sleeve = Math.random() < 0.5 ? shirt : skin;     // long or short sleeves
+    const arm = mk(box(0.12 * build, 0.56, 0.13 * build), sleeve); arm.position.y = -0.28; grp.add(arm);
+    return grp;
+  };
+  const legL = mkLeg(-1), legR = mkLeg(1), armL = mkArm(-1), armR = mkArm(1);
 
-  if (!opts.armed) {
-    try { _addCivAccessories(g, opts.scaleVar || 1); } catch (e) { /* accessories optional */ }
-  }
+  const pelvis = mk(box(0.42 * build, 0.26, 0.26 * build), pants); pelvis.position.y = 0.88;
+  const torso = mk(box(0.46 * build, 0.62, 0.28 * build), shirt); torso.position.y = 1.21;
+  // a slim collar/neck so the head doesn't float
+  const neck = mk(box(0.12, 0.1, 0.12), skin); neck.position.y = 1.55;
+  const head = mk(new THREE.SphereGeometry(0.135, 12, 10), skin); head.scale.set(0.95, 1.06, 1.0); head.position.y = 1.69;
+  const hairCap = mk(new THREE.SphereGeometry(0.143, 12, 10), hair, 0.9); hairCap.scale.set(1.02, 0.82, 1.06); hairCap.position.set(0, 1.73, -0.01);
 
-  if (opts.armed) {
-    _wireBus();
-    // find the bones the aim rig poses
-    const bones = {};
-    inner.traverse((o) => {
-      if (!o.isBone) return;
-      switch (o.name) {
-        case 'mixamorigRightHand': bones.hand = o; break;
-        case 'mixamorigRightForeArm': bones.foreArm = o; break;
-        case 'mixamorigRightArm': bones.arm = o; break;
-        case 'mixamorigSpine2': bones.spine = o; break;
-      }
-    });
-    const gun = new THREE.Mesh(
-      new THREE.BoxGeometry(0.06, 0.12, 0.42),
-      new THREE.MeshStandardMaterial({ color: 0x23262b, metalness: 0.6, roughness: 0.4 }));
-    gun.castShadow = true;
-    gun.scale.setScalar(AIM.gunScale);
-    const muzzle = new THREE.Object3D(); gun.add(muzzle); muzzle.position.set(0, 0, AIM.muzzleZ);
-    if (bones.hand) {
-      bones.hand.add(gun);                                   // gun follows the hand through animation
-      gun.position.set(AIM.gunPos[0], AIM.gunPos[1], AIM.gunPos[2]);
-      gun.rotation.set(AIM.gunRot[0], AIM.gunRot[1], AIM.gunRot[2]);
-      actor.bones = bones; actor.gun = gun; actor.gunRestZ = gun.position.z;
-      _armed.push(actor);
-    } else {
-      gun.position.set(0.24, 1.2, 0.55); g.add(gun);         // no skeleton -> bolt to the group (fallback)
-    }
-    actor.armed = true;
-    g.userData.muzzle = muzzle; g.userData.gun = gun;
-  }
+  g.add(legL, legR, pelvis, torso, armL, armR, neck, head, hairCap);
+  g.userData.legL = legL; g.userData.legR = legR; g.userData.armL = armL; g.userData.armR = armR;
+  // hats / backpacks / vests / bags for extra crowd variety (over the hair)
+  try { _addCivAccessories(g, sv); } catch (e) { /* accessories optional */ }
+  g.scale.setScalar(sv);
   return g;
+}
+
+// Build one pedestrian. Returns a Group (feet at origin, ~1.8 tall, facing +Z)
+// with userData.legL/legR/armL/armR (animated by the host's procedural swing).
+//   opts: { colorize?: hex (shirt tint), armed?: bool, scaleVar?: number }
+// The player (armed) is never routed here — return null so buildPerson keeps owning it.
+export function makeActor(opts = {}) {
+  if (opts.armed) return null;
+  try { return _buildCivilian(opts); } catch (e) { return null; }
 }
 
 // Crossfade to the clip the movement state implies, advance the mixer, then apply
