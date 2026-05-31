@@ -502,23 +502,67 @@ function buildBuilding(rng) {
   body.position.y = h / 2; body.castShadow = true; body.receiveShadow = true;
   g.add(body);
 
-  // ROOF dressing for skyline variety: a pitched cap on houses; a parapet + a
-  // rooftop housing box on tall blocks.
+  // --- ARCHITECTURAL DETAIL via a SHARED-unit-geometry batch helper. Elements
+  // tagged userData.batchKey are collapsed ACROSS the whole town into one
+  // InstancedMesh per key by ensureInit's instancifyTown: they ride a SHARED unit
+  // geo, so each element's per-mesh scale bakes into its instance matrix. That's
+  // what lets buildings carry cornices/ledges/entrances/roof clutter and still
+  // cost almost nothing. The colours below MUST match instancifyTown's batch mats.
+  // NOTE: these unit geos/materials are allocated PER CALL on purpose — buildBuilding
+  // must stay self-contained (scene-stats extracts + runs it in isolation), so they
+  // can't be hoisted to module scope. They're one-time build-phase allocs the batcher
+  // discards; never GPU-uploaded (the InstancedMesh renders the shared geo/mat).
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  const unitCyl = new THREE.CylinderGeometry(1, 1, 1, 8);
+  const unitCone = new THREE.ConeGeometry(1, 1, 4);
+  const bgeo = { trim: unitBox, mech: unitBox, dark: unitBox, tank: unitCyl, antenna: unitCyl, roof: unitCone };
+  const bcol = { trim: 0xb8b2a6, mech: 0x8d9197, dark: 0x26282e, tank: 0x6b6f76, antenna: 0x2a2c30, roof: 0x5a4636 };
+  const bmat = {};   // one fallback material per key per building (instancing replaces them with shared mats)
+  const part = (key, sx, sy, sz, px, py, pz, ry) => {
+    const mat = bmat[key] || (bmat[key] = new THREE.MeshStandardMaterial({ color: bcol[key], roughness: 0.8 }));
+    const m = new THREE.Mesh(bgeo[key], mat);
+    m.scale.set(sx, sy, sz); m.position.set(px, py, pz); if (ry) m.rotation.y = ry;
+    m.castShadow = true; m.receiveShadow = true; m.userData.batchKey = key;
+    g.add(m); return m;
+  };
+
+  // base course (foundation band, slight overhang) + a top cornice on real
+  // buildings + the odd intermediate string course on mid/high-rises.
+  part('trim', w + 0.3, 0.6, d + 0.3, 0, 0.3, 0);
+  if (zone !== 'residential') {
+    part('trim', w + 0.5, 0.55, d + 0.5, 0, h - 0.1, 0);            // cornice at the roofline
+    const courses = h > 18 ? 2 : (h > 11 ? 1 : 0);
+    for (let i = 1; i <= courses; i++) part('trim', w + 0.16, 0.2, d + 0.16, 0, (h * i) / (courses + 1), 0);
+  }
+
+  // street entrance on one face: a dark door slab, flanking pilasters, a canopy.
+  {
+    const f = [[0, 1], [0, -1], [1, 0], [-1, 0]][(rng() * 4) | 0];
+    const fa = Math.atan2(f[0], f[1]);                                // yaw mapping local +Z -> face normal
+    const fh = (f[0] !== 0) ? w / 2 : d / 2;
+    const tx = f[1], tz = -f[0];                                      // unit tangent along the face
+    const dw = zone === 'residential' ? 1.1 : 1.5;
+    part('dark', dw, 2.2, 0.16, f[0] * (fh + 0.04), 1.1, f[1] * (fh + 0.04), fa);                 // door slab
+    for (const s of [-1, 1]) part('trim', 0.18, 2.4, 0.2, f[0] * (fh + 0.02) + tx * s * (dw / 2 + 0.12), 1.2, f[1] * (fh + 0.02) + tz * s * (dw / 2 + 0.12), fa);
+    part('dark', dw + 0.6, 0.22, 0.7, f[0] * (fh + 0.3), 2.45, f[1] * (fh + 0.3), fa);            // canopy/lintel
+  }
+
+  // ROOFLINE by zone: houses get a pitched hip roof + chimney; everything else a
+  // flat roof with a parapet ring + mechanical clutter (AC, penthouse, tank, mast).
   if (zone === 'residential') {
-    const roof = new THREE.Mesh(new THREE.ConeGeometry(1, 1, 4),
-      new THREE.MeshStandardMaterial({ color: 0x5a4636, roughness: 0.95 }));
-    roof.rotation.y = Math.PI / 4; roof.scale.set(w * 0.72, 1.3, d * 0.72);
-    roof.position.y = h + 0.65; roof.castShadow = true; g.add(roof);
-  } else if (h > 12) {
-    const cap = new THREE.Mesh(new THREE.BoxGeometry(w + 0.4, 0.5, d + 0.4),
-      new THREE.MeshStandardMaterial({ color: 0x3f444c, roughness: 0.85 }));
-    cap.position.y = h + 0.2; cap.castShadow = true; g.add(cap);
-    if (rng() < 0.7) {
-      const hut = new THREE.Mesh(new THREE.BoxGeometry(w * 0.3, 1.4, d * 0.3),
-        new THREE.MeshStandardMaterial({ color: 0x4a4f57, roughness: 0.9 }));
-      hut.position.set((rng() - 0.5) * w * 0.3, h + 1.1, (rng() - 0.5) * d * 0.3);
-      hut.castShadow = true; g.add(hut);
-    }
+    part('roof', w * 0.78, 1.4, d * 0.78, 0, h + 0.7, 0, Math.PI / 4);
+    part('dark', 0.5, 1.2, 0.5, w * 0.26, h + 1.0, d * 0.2);
+  } else {
+    // parapet ring (four thin walls standing above the roof edge)
+    part('trim', w + 0.2, 0.6, 0.2, 0, h + 0.3, (d / 2));
+    part('trim', w + 0.2, 0.6, 0.2, 0, h + 0.3, -(d / 2));
+    part('trim', 0.2, 0.6, d + 0.2, (w / 2), h + 0.3, 0);
+    part('trim', 0.2, 0.6, d + 0.2, -(w / 2), h + 0.3, 0);
+    const acN = zone === 'industrial' ? 2 : 1 + ((rng() * 2) | 0);
+    for (let i = 0; i < acN; i++) part('mech', 1.3 + rng(), 0.7, 1.0 + rng() * 0.6, (rng() - 0.5) * w * 0.6, h + 0.85, (rng() - 0.5) * d * 0.6);
+    if (rng() < 0.6) part('mech', w * 0.3, 1.8 + rng() * 1.2, d * 0.3, (rng() - 0.5) * w * 0.3, h + 1.4, (rng() - 0.5) * d * 0.3);   // penthouse / stair head
+    if (zone !== 'industrial' && rng() < 0.5) part('tank', 1.0, 1.6, 1.0, (rng() - 0.5) * w * 0.4, h + 1.6, (rng() - 0.5) * d * 0.4); // water tank
+    if (h > 22 && rng() < 0.7) part('antenna', 0.1, 4 + rng() * 3, 0.1, (rng() - 0.5) * w * 0.3, h + 3, (rng() - 0.5) * d * 0.3);     // rooftop mast
   }
 
   // WINDOW strips: emissive squares on the ±Z faces (downtown also gets ±X for a
@@ -548,7 +592,9 @@ function buildBuilding(rng) {
       }
     }
   }
-  return { mesh: g, w, d };
+  // {mesh,w,d} is the contract; h is added (superset) so the world-gen pass can
+  // record each collider's height for Lane D's impact physics.
+  return { mesh: g, w, d, h };
 }
 
 // A drivable car (simplified from render3d's buildCar). Faces -Z at heading 0
@@ -759,7 +805,23 @@ function instancifyTown(root) {
     new THREE.MeshStandardMaterial({ color: 0xffe39a, emissive: 0xffcf6a, emissiveIntensity: 0.85, roughness: 0.5 }),
     new THREE.MeshStandardMaterial({ color: 0xc9c2a8, emissive: 0x9a8f60, emissiveIntensity: 0.75, roughness: 0.5 }),
   ];
+  // Shared unit geos + materials for the architectural-detail batches. buildBuilding
+  // builds cornices/ledges/doors/roof-clutter on a matching unit geo + per-mesh
+  // SCALE; the scale rides into each instance matrix, so one InstancedMesh per key
+  // reproduces every element's true size. Colours MUST match buildBuilding's bcol.
+  const uBox = new THREE.BoxGeometry(1, 1, 1);
+  const uCyl = new THREE.CylinderGeometry(1, 1, 1, 8);
+  const uCone = new THREE.ConeGeometry(1, 1, 4);
+  const batchCfg = {
+    trim: { geo: uBox, mat: new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.9 }) },
+    mech: { geo: uBox, mat: new THREE.MeshStandardMaterial({ color: 0x8d9197, roughness: 0.6, metalness: 0.35 }) },
+    dark: { geo: uBox, mat: new THREE.MeshStandardMaterial({ color: 0x26282e, roughness: 0.6, metalness: 0.25 }) },
+    tank: { geo: uCyl, mat: new THREE.MeshStandardMaterial({ color: 0x6b6f76, roughness: 0.55, metalness: 0.4 }) },
+    antenna: { geo: uCyl, mat: new THREE.MeshStandardMaterial({ color: 0x2a2c30, roughness: 0.5, metalness: 0.5 }) },
+    roof: { geo: uCone, mat: new THREE.MeshStandardMaterial({ color: 0x5a4636, roughness: 0.95 }) },
+  };
   const winByKey = [[], [], []];
+  const batchByKey = {};              // batchKey -> [meshes]
   const buckets = new Map();          // geo|mat -> { geo, mat, items[] }
   let before = 0;
   root.traverse((o) => {
@@ -767,6 +829,8 @@ function instancifyTown(root) {
     before++;
     const wk = o.userData && o.userData.winKey;
     if (wk != null && winByKey[wk]) { winByKey[wk].push(o); return; }
+    const bk = o.userData && o.userData.batchKey;
+    if (bk && batchCfg[bk]) { (batchByKey[bk] || (batchByKey[bk] = [])).push(o); return; }
     if (Array.isArray(o.material) || !o.geometry || !o.material) return;
     const key = o.geometry.uuid + '|' + o.material.uuid;
     let b = buckets.get(key);
@@ -785,8 +849,9 @@ function instancifyTown(root) {
     for (const m of items) m.removeFromParent();
   };
   for (let k = 0; k < winByKey.length; k++) if (winByKey[k].length) bake(winGeo, winMats[k], winByKey[k]);
+  for (const bk in batchByKey) if (batchByKey[bk].length) bake(batchCfg[bk].geo, batchCfg[bk].mat, batchByKey[bk]);
   for (const b of buckets.values()) {
-    if (b.items.length < 2) { after++; continue; }   // singletons (bodies/roofs/huts) stay as meshes
+    if (b.items.length < 2) { after++; continue; }   // singletons (building bodies) stay as meshes for the texture pass
     bake(b.geo, b.mat, b.items);
   }
   // sweep up now-empty groups (cosmetic tidy)
@@ -875,10 +940,15 @@ function ensureInit() {
     return gx < 0 ? 'industrial' : 'residential';   // outer ring
   };
   const placeBuilding = (cx, cz, zone, ox, oz) => {
-    const { mesh, w, d } = buildBuilding(rng, { zone });
-    mesh.position.set(cx + ox, 0, cz + oz);
+    const { mesh, w, d, h } = buildBuilding(rng, { zone });
+    const bx = cx + ox, bz = cz + oz;
+    mesh.position.set(bx, 0, bz);
     town.add(mesh);
-    aabbs.push({ minX: cx + ox - w / 2, maxX: cx + ox + w / 2, minZ: cz + oz - d / 2, maxZ: cz + oz + d / 2 });
+    // Collider = the body footprint. The new cornices/ledges/entrance/roof clutter
+    // are flush, above head, or tiny (<0.15) overhangs, so the GROUND footprint is
+    // unchanged — collider still matches the wall you walk into. Enriched with
+    // centre/dims/height/zone for Lane D's impact physics (handoff in REQUESTS.md).
+    aabbs.push({ minX: bx - w / 2, maxX: bx + w / 2, minZ: bz - d / 2, maxZ: bz + d / 2, cx: bx, cz: bz, w, d, height: h, zone });
   };
 
   for (let gx = -GRID; gx <= GRID; gx++) {
@@ -1683,6 +1753,11 @@ OF.internals = {
   get renderer() { return renderer; },
   get canvas() { return canvas; },
   player, keys, peds, vehicles, aabbs,
+  // Clean town-building collider list for Lane D's impact physics: every entry is
+  // a solid box from y=0..height with footprint centre (cx,cz) + dims (w,d). The
+  // height!=null guard excludes the bank wall footprints that onfoot-heist.js injects
+  // into aabbs at runtime (those carry only minX/maxX/minZ/maxZ, no height).
+  get buildings() { return aabbs.filter((a) => a.height != null); },
   get yaw() { return yaw; }, set yaw(v) { yaw = v; },
   get pitch() { return pitch; }, set pitch(v) { pitch = v; },
   get locked() { return locked; },
