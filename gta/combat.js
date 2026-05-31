@@ -51,11 +51,21 @@ const WEAPONS = {
     fireCooldown: 0.8, clip: 6, reserveMax: 60, auto: false,
     pellets: 6, spread: 0.09, melee: false,
   },
+  // thrown frag grenade. explosive:true routes it to the throw/detonate branch (never
+  // hitscan). clip:1 = grenade in hand, reserve = spares; reloads like a gun (R / auto).
+  grenade: {
+    id: 'grenade', name: 'Grenade', slot: 6, damage: 120, rangeM: 0,
+    fireCooldown: 0.9, clip: 1, reserveMax: 9, auto: false,
+    pellets: 1, spread: 0, melee: false,
+    explosive: true, blastRadius: 7.0, fuse: 1.6, throwSpeed: 17, throwUp: 5.5, selfDamage: 0.5,
+  },
 };
-// slot index (1..5) -> weapon id, for Digit1..Digit5 selection
-const SLOT_TO_ID = { 1: 'fists', 2: 'pistol', 3: 'ak47', 4: 'smg', 5: 'shotgun' };
+// slot index (1..6) -> weapon id, for Digit1..Digit6 selection
+const SLOT_TO_ID = { 1: 'fists', 2: 'pistol', 3: 'ak47', 4: 'smg', 5: 'shotgun', 6: 'grenade' };
 // stable cycle order for Tab
-const CYCLE_ORDER = ['fists', 'pistol', 'ak47', 'smg', 'shotgun'];
+const CYCLE_ORDER = ['fists', 'pistol', 'ak47', 'smg', 'shotgun', 'grenade'];
+// grenade ballistics (module-scope consts; no per-frame allocation)
+const GREN_GRAV = 18, GREN_GROUND_Y = 0.18, GREN_MAX = 6, GREN_ARM_DELAY = 0.3;
 
 // ------------------------------------------------------------
 // Module-scope scratch (NO per-frame allocation)
@@ -76,6 +86,10 @@ let _beamUp = null;                // +Y reference for orienting the beam cylind
 let _casingWorld = null;           // world pos of the gun's ejection port (fx:casing)
 let _casingDir = null;             // casing toss direction (gun's right, biased up)
 let _ejQuat = null;                // scratch quaternion for the eject node's world rotation
+let _grThrowPos = null;            // grenade spawn (throw origin) — dedicated, never aliases _muzzleWorld
+let _grThrowDir = null;            // grenade throw direction (camera forward)
+let _grTmp = null;                 // per-target hit point during radial detonation
+let _grBlastPos = null;            // detonation centre
 
 // Per-weapon tracer/flash styling: a warm glow + a near-white hot core, sized and
 // tinted per weapon so each gun reads differently down-range.
@@ -85,6 +99,7 @@ const TRACER_STYLE = {
   smg:     { glow: 0xffe48a, core: 0xffffff, r: 0.017, life: 0.04 },
   shotgun: { glow: 0xffc94a, core: 0xfff0c0, r: 0.022, life: 0.06 },
   fists:   null,
+  grenade: null,   // explosive never hitscans, so it draws no tracer
 };
 
 // ------------------------------------------------------------
@@ -138,6 +153,11 @@ const combat = {
     _casingWorld = new THREE.Vector3();
     _casingDir = new THREE.Vector3();
     _ejQuat = new THREE.Quaternion();
+    _grThrowPos = new THREE.Vector3();
+    _grThrowDir = new THREE.Vector3();
+    _grTmp = new THREE.Vector3();
+    _grBlastPos = new THREE.Vector3();
+    this._grenades = this._grenades || [];   // fixed-cap reusable projectile pool
 
     // ----- loadout: start with just fists (host hands out pistol later) -----
     if (!this.owned) {
@@ -213,6 +233,19 @@ const combat = {
     this._flash = flash;
     this._flashT = 0;
     this._flashMax = FLASH_LIFE;
+
+    // thrown-grenade projectile prototype (a tiny olive frag-ball + steel cap),
+    // cloned lazily per live grenade; pooled meshes are hidden, never removed.
+    const grenMat = new THREE.MeshStandardMaterial({ color: 0x3f4a2a, roughness: 0.75, metalness: 0.2 });
+    const capMat = new THREE.MeshStandardMaterial({ color: 0x33373d, roughness: 0.4, metalness: 0.5 });
+    this._grenadeProto = () => {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), grenMat);
+      m.scale.set(0.9, 1.12, 0.9);
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.045, 0.06, 8), capMat); cap.position.y = 0.12;
+      m.add(cap);
+      m.castShadow = true;
+      return m;
+    };
   },
 
   // ============================================================
@@ -227,6 +260,8 @@ const combat = {
     // tick timers regardless of alive state so FX clear out cleanly
     if (this.cooldown > 0) this.cooldown -= dt;
     this._decayFx(dt);
+    // live grenades keep cooking/flying even while reloading or after death
+    this._stepGrenades(dt, ctx);
 
     // keep the avatar's visible weapon mesh in sync with the equipped weapon —
     // this is what makes the modeled gun (and the fists = no-gun state) show up,
@@ -242,8 +277,8 @@ const combat = {
     // dead players don't act
     if (player.alive === false) return;
 
-    // ---- weapon selection: Digit1..Digit5 (slot) ----
-    for (let n = 1; n <= 5; n++) {
+    // ---- weapon selection: Digit1..Digit6 (slot) ----
+    for (let n = 1; n <= 6; n++) {
       if (input.consume && input.consume('Digit' + n)) {
         this.api.select(n);
       }
@@ -273,7 +308,18 @@ const combat = {
     }
 
     if (wantFire && this.cooldown <= 0 && !this.reloading) {
-      if (w.melee) {
+      if (w.explosive) {
+        // thrown grenade: consume one from the "clip" (in-hand), lob a projectile
+        const slot = this.owned[w.id];
+        if (slot && slot.clip > 0) {
+          this._throwGrenade(ctx, w);
+          this.cooldown = w.fireCooldown;
+        } else if (slot && slot.reserve > 0) {
+          this._beginReload();          // rack the next grenade from spares
+        } else {
+          this.cooldown = 0.3;          // dry: brief lockout, no throw
+        }
+      } else if (w.melee) {
         this._meleeAttack(ctx, w);
         this.cooldown = w.fireCooldown;
       } else {
@@ -305,6 +351,8 @@ const combat = {
     this.reloadT = 0;
     this._shownWeapon = null;   // re-sync the in-hand weapon mesh after respawn/re-enter
     this._flashT = 0;
+    // kill any grenade still in flight so it can't cook off on the freshly-spawned player
+    if (this._grenades) for (const r of this._grenades) { r.dead = true; if (r.mesh) r.mesh.visible = false; }
     if (this._flash) { this._flash.visible = false; this._flash.material.opacity = 0; }
     if (this._tracerPool) {
       for (const ln of this._tracerPool.items) { ln.visible = false; ln.userData.life = 0; }
@@ -498,6 +546,122 @@ const combat = {
   },
 
   // ============================================================
+  // GRENADE — thrown explosive: lob a projectile, integrate it with gravity in
+  // update(), detonate on fuse/ground-rest/building-hit, emit fx:explosion + apply
+  // radial damage through the SAME entry.onHit gateway _castRay uses (so the owning
+  // system emits entityKilled exactly once). Fully self-contained; never throws.
+  // ============================================================
+  _throwGrenade(ctx, w) {
+    const slot = this.owned[w.id];
+    if (!slot) return;
+    slot.clip = Math.max(0, slot.clip - 1);
+
+    // throw origin = the held grenade's muzzle node (camera+forward fallback)
+    this._muzzleStart(ctx, _grThrowPos);
+    if (GTA.host && typeof GTA.host.cameraDir === 'function') GTA.host.cameraDir(_grThrowDir);
+    else if (ctx.camera) ctx.camera.getWorldDirection(_grThrowDir);
+    else _grThrowDir.set(0, 0, -1);
+    if (_grThrowDir.lengthSq() < 1e-6) _grThrowDir.set(0, 0, -1);
+    _grThrowDir.normalize();
+
+    const rec = this._acquireGrenade(ctx);
+    if (!rec) return;
+    rec.pos.copy(_grThrowPos);
+    rec.vel.set(_grThrowDir.x * w.throwSpeed, _grThrowDir.y * w.throwSpeed + w.throwUp, _grThrowDir.z * w.throwSpeed);
+    rec.fuse = w.fuse; rec.age = 0; rec.dead = false; rec.w = w;
+    if (rec.mesh) { rec.mesh.position.copy(rec.pos); rec.mesh.visible = true; }
+
+    if (ctx.bus) {
+      ctx.bus.emit('shake', { amount: 0.25 });   // light throw kick (no recoil for a lob)
+      if (ctx.player) { _crimePos.copy(ctx.player.pos); ctx.bus.emit('crime', { kind: 'propertyDamage', pos: _crimePos, severity: 0.3, source: 'player' }); }
+      ctx.bus.emit('weapon:changed', { slot: w.slot, weapon: this._weaponSnapshot() });   // keep HUD clip live
+    }
+  },
+
+  // grab a dead record to reuse, grow up to GREN_MAX, else reuse the oldest. Builds the
+  // mesh lazily only when a scene exists; headless (no scene) keeps mesh null and still
+  // simulates + detonates on rec.pos so radial damage is unaffected.
+  _acquireGrenade(ctx) {
+    const arr = this._grenades || (this._grenades = []);
+    let rec = null;
+    for (let i = 0; i < arr.length; i++) { if (arr[i].dead) { rec = arr[i]; break; } }
+    if (!rec) {
+      if (arr.length < GREN_MAX) { rec = { mesh: null, pos: new THREE.Vector3(), vel: new THREE.Vector3(), fuse: 0, age: 0, dead: true, w: null }; arr.push(rec); }
+      else rec = arr[0];
+    }
+    if (!rec.mesh && ctx.scene && typeof this._grenadeProto === 'function') {
+      try { rec.mesh = this._grenadeProto(); rec.mesh.frustumCulled = false; ctx.scene.add(rec.mesh); }
+      catch (e) { rec.mesh = null; }
+    }
+    return rec;
+  },
+
+  _stepGrenades(dt, ctx) {
+    const arr = this._grenades;
+    if (!arr || !arr.length) return;
+    const world = ctx && ctx.world;
+    for (let i = 0; i < arr.length; i++) {
+      const r = arr[i];
+      if (r.dead) continue;
+      r.age += dt;
+      r.vel.y -= GREN_GRAV * dt;
+      r.pos.x += r.vel.x * dt; r.pos.y += r.vel.y * dt; r.pos.z += r.vel.z * dt;
+      r.fuse -= dt;
+      if (r.pos.y <= GREN_GROUND_Y) {   // bounce + damp on the ground; detonate on fuse, not impact
+        r.pos.y = GREN_GROUND_Y; r.vel.y = -r.vel.y * 0.35; r.vel.x *= 0.6; r.vel.z *= 0.6;
+        if (r.vel.lengthSq() < 0.25) r.vel.set(0, 0, 0);
+      }
+      let hitWall = false;
+      if (world && typeof world.isInside === 'function') { try { hitWall = !!world.isInside(r.pos.x, r.pos.z, 0.2); } catch (e) { /* no-op */ } }
+      if (r.mesh) { r.mesh.position.copy(r.pos); r.mesh.rotation.x += dt * 6; r.mesh.rotation.z += dt * 4; }
+      if (r.fuse <= 0 || hitWall) this._detonate(ctx, r);
+    }
+  },
+
+  _detonate(ctx, r) {
+    r.dead = true;
+    if (r.mesh) r.mesh.visible = false;
+    const w = r.w || WEAPONS.grenade;
+    const R = w.blastRadius || 6;
+    _grBlastPos.copy(r.pos);
+    const bus = ctx && ctx.bus;
+    // (a) FX for B + (b) a hefty shake — fresh plain object (fx.js may hold it)
+    if (bus) {
+      bus.emit('fx:explosion', { pos: { x: _grBlastPos.x, y: _grBlastPos.y, z: _grBlastPos.z }, radius: R });
+      bus.emit('shake', { amount: 1.2 });
+      // (c) loud wanted-relevant crime at the blast
+      if (ctx.player) { _crimePos.copy(ctx.player.pos); bus.emit('crime', { kind: 'gunfire', pos: _crimePos, severity: 1.0, source: 'player' }); }
+    }
+    // (d) radial damage vs ctx.targets via the same onHit gateway as bullets (the
+    //     owning system emits entityKilled — do NOT emit it here, or kills double-count)
+    const targets = ctx && ctx.targets;
+    if (Array.isArray(targets)) {
+      for (let i = 0; i < targets.length; i++) {
+        const e = targets[i];
+        if (!e || e.dead || !e.pos) continue;
+        const cy = e.pos.y + (e.height || 1.7) * 0.5;
+        const dx = e.pos.x - _grBlastPos.x, dy = cy - _grBlastPos.y, dz = e.pos.z - _grBlastPos.z;
+        const dist = Math.hypot(dx, dy, dz);
+        if (dist > R + (e.radius || 0.5)) continue;
+        const fall = GU.clamp(1 - dist / R, 0, 1);
+        const dmg = w.damage * fall * fall;   // quadratic: punchy core, soft edge
+        if (dmg <= 0) continue;
+        _grTmp.set(e.pos.x, cy, e.pos.z);
+        if (typeof e.onHit === 'function') { try { e.onHit(dmg, 'player', _grTmp); } catch (err) { /* never brick the frame */ } }
+      }
+    }
+    // (e) self-damage (armed-delay so a throw-and-detonate at your feet isn't a free kill)
+    if (ctx && ctx.player && ctx.player.pos && ctx.player.alive !== false && r.age >= GREN_ARM_DELAY) {
+      const pd = Math.hypot(ctx.player.pos.x - _grBlastPos.x, (ctx.player.pos.y + 0.9) - _grBlastPos.y, ctx.player.pos.z - _grBlastPos.z);
+      if (pd < R) {
+        const sf = GU.clamp(1 - pd / R, 0, 1);
+        const self = w.damage * (w.selfDamage || 0) * sf * sf;
+        if (self > 0) this.api.damagePlayer(self, 'explosion', { x: _grBlastPos.x, y: _grBlastPos.y, z: _grBlastPos.z });
+      }
+    }
+  },
+
+  // ============================================================
   // RELOAD
   // ============================================================
   _beginReload() {
@@ -510,6 +674,9 @@ const combat = {
     if (slot.reserve <= 0) return;         // nothing to load
     this.reloading = true;
     this.reloadT = RELOAD_TIME;
+    // tell B's audio a reload started (mag-out/in SFX, length-matched to duration;
+    // for the grenade this maps to a pin/spoon sound). Additive + headless-safe.
+    if (this.ctx) this.ctx.bus.emit('weapon:reload', { id: this.current, slot: w.slot, phase: 'start', duration: RELOAD_TIME, clip: slot.clip, reserve: slot.reserve });
   },
 
   _finishReload() {
@@ -523,7 +690,10 @@ const combat = {
     const take = Math.min(need, slot.reserve);
     slot.clip += take;
     slot.reserve -= take;
-    if (this.ctx) this.ctx.bus.emit('weapon:changed', { slot: w.slot, weapon: this._weaponSnapshot() });
+    if (this.ctx) {
+      this.ctx.bus.emit('weapon:changed', { slot: w.slot, weapon: this._weaponSnapshot() });
+      this.ctx.bus.emit('weapon:reload', { id: w.id, slot: w.slot, phase: 'end', clip: slot.clip, reserve: slot.reserve });
+    }
   },
 
   // ============================================================
@@ -801,7 +971,7 @@ const combat = {
       return combat._weaponSnapshot();
     },
 
-    // select a weapon by id ('pistol') or slot number (1..5). Returns success.
+    // select a weapon by id ('pistol') or slot number (1..6). Returns success.
     select(idOrSlot) {
       let id = idOrSlot;
       if (typeof idOrSlot === 'number') id = SLOT_TO_ID[idOrSlot];
