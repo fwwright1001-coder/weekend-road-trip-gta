@@ -135,6 +135,42 @@ window.ONFOOT = OF;
 //     to kick the third-person AND first-person camera. (recoil is initialised below.)
 OF.kick = function (amt) { recoil += (amt || 0); };
 
+// ============================================================
+// LIVING WORLD (Lane C) — day/night cycle + weather + night lighting. Lane C owns
+// GLOBAL/ambient lighting (sun, hemisphere, sky dome, fog) and these world fields;
+// Lane B reads OF.timeOfDay / OF.weather to tune transient event FX (headlights,
+// streetlight flicker). updateWorld() mutates the existing init lights each frame —
+// it adds NO draw calls (rain is a single Points object).
+// ============================================================
+const world = {
+  sun: null, hemi: null, skyU: null, fog: null, rain: null,
+  lamps: [],                 // emissive mats registered to brighten at night: {mat, day, night, base}
+  t: 0.40,                   // time of day 0..1 (0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 = sunset)
+  speed: 1 / 200,            // a full day in ~200s (visible within a playthrough)
+  weather: 'clear', wI: 0, wTarget: 0, wTimer: 24, wIdx: 0, wPinned: false, wPending: null,
+};
+const _wc1 = new THREE.Color(), _wc2 = new THREE.Color();   // scratch for colour lerps
+// Published for Lane B each frame (0 = midnight, 0.5 = noon; "dark" is < ~0.23 or > ~0.75).
+OF.timeOfDay = world.t;
+OF.weather = world.weather;        // 'clear' | 'rain' | 'fog'
+OF.weatherIntensity = world.wI;    // 0..1
+OF.setTimeOfDay = function (v) { world.t = ((Number(v) % 1) + 1) % 1; OF.timeOfDay = world.t; };
+OF.setDayLength = function (sec) { if (sec > 0) world.speed = 1 / sec; };
+// Force a weather state (pins the auto-scheduler). setWeather('auto') resumes cycling.
+// Switching TYPE while a front is still visible fades the old one out first (no pop).
+OF.setWeather = function (type, intensity) {
+  if (type === 'auto') { world.wPinned = false; world.wPending = null; world.wTimer = 6; return; }
+  world.wPinned = true;
+  const tgt = intensity == null ? (type === 'clear' ? 0 : 0.85) : Math.max(0, Math.min(1, intensity));
+  if (type && type !== world.weather && world.wI > 0.05) { world.wPending = { type, tgt }; world.wTarget = 0; }
+  else { world.weather = type || 'clear'; world.wTarget = tgt; world.wPending = null; OF.weather = world.weather; }
+};
+// Register an emissive material to brighten at night (windows, lamps). day/night are
+// multipliers on the material's current emissiveIntensity (captured as base).
+OF.registerNightLight = function (mat, day, night) {
+  if (mat && mat.isMaterial) world.lamps.push({ mat, day: day == null ? 0.12 : day, night: night == null ? 1 : night, base: mat.emissiveIntensity || 1 });
+};
+
 // ---- module state ----------------------------------------------------------
 let scene, camera, renderer, canvas;
 let initialized = false;
@@ -161,6 +197,7 @@ const player = {
 
 const peds = [];             // {mesh, mat[], pos, vel, target, state, t, dead, fall}
 const aabbs = [];            // building footprints {minX,maxX,minZ,maxZ}
+const interiors = [];        // enterable shops {x,z,w,d,doorX,doorZ,kind} — exposed to Lane D
 const vehicles = [];         // {mesh, wheels[], pos, heading, speed, occupied}
 let mode = 'foot';           // 'foot' | 'drive'
 let playerVehicle = null;    // the car you're currently driving, or null
@@ -858,6 +895,82 @@ function makeRng(seed) {
 }
 
 // ============================================================
+// ENTERABLE SHOP — a hollow single-storey interior you can walk into. Four
+// perimeter walls (the wall whose outward normal === doorN is split around a
+// doorway gap), a low storefront bulkhead + glass over the door wall, a floor +
+// ceiling, an always-on ceiling light, and a counter + shelves. Walls/floor/
+// fixtures ride the shared batchKeys so they instance with the town. Returns
+// { group, colliders, doorPos } — colliders are thin wall AABBs in LOCAL space
+// (doorway intentionally left open) that the caller offsets into world space and
+// pushes into `aabbs`, so the player is bounded inside but can walk through the door.
+// ============================================================
+function buildShop(rng, doorN) {
+  const g = new THREE.Group();
+  const W = 11, D = 10, H = 4.6, T = 0.35, HW = W / 2, HD = D / 2, doorHalf = 1.4;
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  const bcol = { trim: 0xb8b2a6, dark: 0x26282e, mech: 0x8d9197 };
+  const bmat = {};
+  const part = (key, sx, sy, sz, px, py, pz) => {
+    const mat = bmat[key] || (bmat[key] = new THREE.MeshStandardMaterial({ color: bcol[key], roughness: 0.85 }));
+    const m = new THREE.Mesh(unitBox, mat);
+    m.scale.set(sx, sy, sz); m.position.set(px, py, pz);
+    m.castShadow = true; m.receiveShadow = true; m.userData.batchKey = key; g.add(m); return m;
+  };
+  const glassMat = new THREE.MeshStandardMaterial({ color: 0x9fb4c4, roughness: 0.1, metalness: 0.1, transparent: true, opacity: 0.32, depthWrite: false, side: THREE.DoubleSide });
+
+  const colliders = [];
+  const isDoor = (nx, nz) => doorN && doorN[0] === nx && doorN[1] === nz;
+  // a full-height solid wall + its collider; (cx,cz) centre, (lx,lz) extents
+  const solidWall = (cx, cz, lx, lz) => {
+    part('trim', lx, H, lz, cx, H / 2, cz);
+    colliders.push({ minX: cx - lx / 2, maxX: cx + lx / 2, minZ: cz - lz / 2, maxZ: cz + lz / 2 });
+  };
+  // a storefront segment: low bulkhead + glass above (collider is the full footprint)
+  const frontSeg = (cx, cz, lx, lz) => {
+    part('dark', lx, 1.1, lz, cx, 0.55, cz);
+    const gp = new THREE.Mesh(new THREE.BoxGeometry(lx * 0.96, H - 1.4, Math.min(lz, T) * 0.5), glassMat);
+    gp.position.set(cx, 1.1 + (H - 1.4) / 2, cz); g.add(gp);
+    colliders.push({ minX: cx - lx / 2, maxX: cx + lx / 2, minZ: cz - lz / 2, maxZ: cz + lz / 2 });
+  };
+
+  // North/South walls run along X (thickness T along Z)
+  for (const sz of [1, -1]) {
+    const cz = sz * HD, segL = HW - doorHalf, off = (HW + doorHalf) / 2;
+    if (isDoor(0, sz)) { frontSeg(-off, cz, segL, T); frontSeg(off, cz, segL, T); }
+    else solidWall(0, cz, W, T);
+  }
+  // East/West walls run along Z (thickness T along X)
+  for (const sx of [1, -1]) {
+    const cx = sx * HW, segL = HD - doorHalf, off = (HD + doorHalf) / 2;
+    if (isDoor(sx, 0)) { frontSeg(cx, -off, T, segL); frontSeg(cx, off, T, segL); }
+    else solidWall(cx, 0, T, D);
+  }
+
+  part('dark', W - 0.1, 0.12, D - 0.1, 0, 0.06, 0);     // floor slab
+  part('mech', W, 0.2, D, 0, H, 0);                     // ceiling slab
+  // always-on ceiling light (interiors are enclosed -> lit day & night)
+  const lite = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.1, 1.4),
+    new THREE.MeshStandardMaterial({ color: 0xfff2cf, emissive: 0xffe6a0, emissiveIntensity: 0.9, roughness: 0.5 }));
+  lite.position.set(0, H - 0.18, 0); g.add(lite);
+  // service counter HUGGING the wall opposite the door (long extent ALONG that wall),
+  // with a collider — works for any door face, never lands mid-room in the entry path.
+  const onX = doorN[0] !== 0;                          // door on an X wall -> back wall is an X wall
+  const bcx = -doorN[0] * (HW - 0.7), bcz = -doorN[1] * (HD - 0.7);
+  const cw = onX ? 0.8 : 4.2, cd = onX ? 4.2 : 0.8;
+  part('mech', cw, 0.95, cd, bcx, 0.48, bcz);
+  colliders.push({ minX: bcx - cw / 2, maxX: bcx + cw / 2, minZ: bcz - cd / 2, maxZ: bcz + cd / 2 });
+  // shelf units against a SIDE wall (perpendicular to the door, clear of the doorway gap), decorative
+  for (let i = 0; i < 2; i++) {
+    const off = (i - 0.5) * 3.0;
+    if (onX) part('dark', 2.6, 2.2, 0.6, off, 1.1, HD - 0.5);     // along the +Z side wall
+    else part('dark', 0.6, 2.2, 2.6, HW - 0.5, 1.1, off);        // along the +X side wall
+  }
+
+  const doorPos = [doorN[0] * HW, doorN[1] * HD];
+  return { group: g, colliders, doorPos };
+}
+
+// ============================================================
 // TOWN BATCHER — collapse the static town repeats into InstancedMeshes (one draw
 // per batch). WINDOWS are the prize: every building makes its own window meshes
 // with their own geometry/material instances, but they're all the SAME
@@ -920,7 +1033,7 @@ function instancifyTown(root) {
     root.add(inst); after++;
     for (const m of items) m.removeFromParent();
   };
-  for (let k = 0; k < winByKey.length; k++) if (winByKey[k].length) bake(winGeo, winMats[k], winByKey[k]);
+  for (let k = 0; k < winByKey.length; k++) if (winByKey[k].length) { bake(winGeo, winMats[k], winByKey[k]); OF.registerNightLight(winMats[k], 0.10, 1.0); }
   for (const bk in batchByKey) if (batchByKey[bk].length) bake(batchCfg[bk].geo, batchCfg[bk].mat, batchByKey[bk]);
   for (const b of buckets.values()) {
     if (b.items.length < 2) { after++; continue; }   // singletons (building bodies) stay as meshes for the texture pass
@@ -963,7 +1076,8 @@ function ensureInit() {
   });
   scene.add(new THREE.Mesh(new THREE.SphereGeometry(900, 32, 16), skyMat));
 
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x4a4540, 0.85));
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x4a4540, 0.85);
+  scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xffe2b0, 1.9);
   sun.position.set(-40, 60, 30); sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -972,6 +1086,17 @@ function ensureInit() {
   sun.shadow.camera.top = 105; sun.shadow.camera.bottom = -105;   // covers the wider 7x7 town
   sun.shadow.bias = -0.0004;
   scene.add(sun); scene.add(sun.target);
+  // capture the global-light refs for the day/night cycle (Lane C owns these)
+  world.sun = sun; world.hemi = hemi; world.skyU = skyMat.uniforms; world.fog = scene.fog;
+
+  // rain: ONE Points object, hidden until it rains (weather is cheap by design)
+  const RAIN_N = 900;
+  const rainGeo = new THREE.BufferGeometry();
+  const rainPos = new Float32Array(RAIN_N * 3);
+  for (let i = 0; i < RAIN_N; i++) { rainPos[i * 3] = (Math.random() - 0.5) * 64; rainPos[i * 3 + 1] = Math.random() * 38; rainPos[i * 3 + 2] = (Math.random() - 0.5) * 64; }
+  rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
+  const rain = new THREE.Points(rainGeo, new THREE.PointsMaterial({ color: 0xaebccd, size: 0.14, transparent: true, opacity: 0, depthWrite: false }));
+  rain.frustumCulled = false; rain.visible = false; scene.add(rain); world.rain = rain;
 
   // ground: grass apron + asphalt plaza/streets
   const grass = new THREE.Mesh(new THREE.PlaneGeometry(800, 800),
@@ -1022,14 +1147,25 @@ function ensureInit() {
     // centre/dims/height/zone for Lane D's impact physics (handoff in REQUESTS.md).
     aabbs.push({ minX: bx - w / 2, maxX: bx + w / 2, minZ: bz - d / 2, maxZ: bz + d / 2, cx: bx, cz: bz, w, d, height: h, zone });
   };
+  // Place a walk-in shop at a cell: offset its local wall colliders into world space
+  // and push them as PLAIN footprints (they're walls, not whole-building impact bodies,
+  // so they stay out of OF.internals.buildings but still block movement / take impacts).
+  const placeShop = (cx, cz, doorN) => {
+    const { group, colliders, doorPos } = buildShop(rng, doorN);
+    group.position.set(cx, 0, cz); town.add(group);
+    for (const c of colliders) aabbs.push({ minX: c.minX + cx, maxX: c.maxX + cx, minZ: c.minZ + cz, maxZ: c.maxZ + cz });
+    interiors.push({ x: cx, z: cz, w: 11, d: 10, doorX: cx + doorPos[0], doorZ: cz + doorPos[1], kind: 'shop' });
+  };
 
   for (let gx = -GRID; gx <= GRID; gx++) {
     for (let gz = -GRID; gz <= GRID; gz++) {
       if (gx === 0 && gz === 0) continue;                  // spawn plaza, kept open
       if (gx === 0 && (gz === -1 || gz === -2)) continue;  // open corridor to the bank (gta heist)
       const zone = zoneFor(gx, gz);
+      // two enterable shops flank the spawn plaza (east + west), doors facing it
+      const isShop = gz === 0 && (gx === 1 || gx === -1);
       const emptyP = zone === 'downtown' ? 0.05 : zone === 'midtown' ? 0.16 : 0.3;
-      if (rng() < emptyP) continue;                        // occasional empty lot (airier outer rings)
+      if (!isShop && rng() < emptyP) continue;             // shops guaranteed; others may be empty lots
       const cx = gx * CELL, cz = gz * CELL;
 
       // concrete sidewalk pad grounds the block (street asphalt shows in the gaps)
@@ -1037,18 +1173,23 @@ function ensureInit() {
       pad.rotation.x = -Math.PI / 2; pad.position.set(cx, 0.0, cz); pad.receiveShadow = true;
       town.add(pad);
 
-      // downtown cells sometimes hold a small cluster of towers; else one block.
-      // Offsets are kept tight (single ≤±1, cluster radius ≤~3.1) so even the
-      // widest footprint (industrial half ≈6.5, downtown half ≈5.5) stays ≥~3
-      // units shy of the cross-street centreline at ±12 — drivable clearance.
-      const cluster = zone === 'downtown' && rng() < 0.5 ? (rng() < 0.5 ? 2 : 3) : 1;
-      if (cluster === 1) {
-        placeBuilding(cx, cz, zone, (rng() - 0.5) * 2, (rng() - 0.5) * 2);
+      if (isShop) {
+        // a hollow walk-in shop instead of a solid block; door opens toward the plaza
+        placeShop(cx, cz, gx === 1 ? [-1, 0] : [1, 0]);
       } else {
-        for (let i = 0; i < cluster; i++) {
-          const a = (i / cluster) * Math.PI * 2 + rng();
-          const rr = 2.0 + rng() * 1.1;
-          placeBuilding(cx, cz, zone, Math.cos(a) * rr, Math.sin(a) * rr);
+        // downtown cells sometimes hold a small cluster of towers; else one block.
+        // Offsets are kept tight (single ≤±1, cluster radius ≤~3.1) so even the
+        // widest footprint (industrial half ≈6.5, downtown half ≈5.5) stays ≥~3
+        // units shy of the cross-street centreline at ±12 — drivable clearance.
+        const cluster = zone === 'downtown' && rng() < 0.5 ? (rng() < 0.5 ? 2 : 3) : 1;
+        if (cluster === 1) {
+          placeBuilding(cx, cz, zone, (rng() - 0.5) * 2, (rng() - 0.5) * 2);
+        } else {
+          for (let i = 0; i < cluster; i++) {
+            const a = (i / cluster) * Math.PI * 2 + rng();
+            const rr = 2.0 + rng() * 1.1;
+            placeBuilding(cx, cz, zone, Math.cos(a) * rr, Math.sin(a) * rr);
+          }
         }
       }
 
@@ -1068,6 +1209,8 @@ function ensureInit() {
     const r = instancifyTown(town);
     console.log(`[ONFOOT world] town batched: ${r.before} meshes -> ${r.after} draws (${town.children.length} top-level)`);
   } catch (e) { console.warn('[ONFOOT world] town instancing skipped', e); }
+  OF.registerNightLight(lampBulbMat, 0.25, 1.35);   // host streetlamps glow at night
+  updateWorld(0);                                   // seed lights/sky/fog to the start time-of-day
 
   // drivable cars: the red convertible at the plaza + parked cars on the streets
   // (x=±12 / z=±12 sit in the cross-streets between the building blocks)
@@ -1369,8 +1512,14 @@ function preloadActorArt(next) {
   OF._actorTried = true;
   setLoading('Loading characters…', 28);
   import('./gta/onfoot-actors.js')
-    .then((mod) => { OF._actorMod = mod; return mod.preloadActors(); })
-    .then((ok) => { if (ok && OF._actorMod) OF._makeActor = OF._actorMod.makeActor; })
+    .then((mod) => {
+      OF._actorMod = mod;
+      // Peds are procedural civilians now (round 3) — wire makeActor IMMEDIATELY,
+      // not gated on the Soldier model loading (civilians don't use it). The asset
+      // still loads below only so aim-check/actor-check can validate it offline.
+      if (mod && mod.makeActor) OF._makeActor = mod.makeActor;
+      return mod.preloadActors();
+    })
     .catch((e) => { console.warn('[ONFOOT] character art unavailable; procedural people', e); })
     .finally(() => { try { next(); } catch (e) { console.error('[ONFOOT] build failed', e); entering = false; hideLoading(); } });
 }
@@ -1487,8 +1636,96 @@ function loop(time) {
   rafId = requestAnimationFrame(loop);
 }
 
+// ============================================================
+// LIVING WORLD — per-frame day/night + weather. Mutates the existing init lights
+// (sun/hemisphere/sky-dome/fog) and the registered emissive lamp/window materials;
+// adds no draw calls. Publishes OF.timeOfDay / OF.weather / OF.weatherIntensity.
+// ============================================================
+const _clampW = (x, a, b) => Math.max(a, Math.min(b, x));
+function updateWeather(dt) {
+  // smooth intensity ramp toward target (~fronts roll in/out over a few seconds)
+  world.wI += (world.wTarget - world.wI) * (1 - Math.exp(-dt * 5));
+  // a pinned setWeather(type) that needed to fade the old front out first: commit it now
+  if (world.wPending && world.wI < 0.05) { world.weather = world.wPending.type; world.wTarget = world.wPending.tgt; world.wPending = null; }
+  if (world.wPinned) return;                       // OF.setWeather() pinned the state
+  world.wTimer -= dt;
+  if (world.wTimer <= 0) {
+    if (world.wTarget > 0) { world.wTarget = 0; world.wTimer = 14; }      // active -> clear out
+    else {                                                                // gap done -> roll a new front in
+      world.weather = (world.wIdx++ % 2 === 0) ? 'rain' : 'fog';
+      world.wTarget = world.weather === 'fog' ? 0.8 : 0.92;
+      world.wTimer = 36;
+    }
+  }
+}
+function updateRain(dt) {
+  const r = world.rain; if (!r) return;
+  const raining = world.weather === 'rain' ? world.wI : 0;
+  r.visible = raining > 0.02;
+  if (!r.visible) return;
+  r.material.opacity = 0.55 * raining;
+  const pos = r.geometry.attributes.position;
+  const cxp = player.pos.x, czp = player.pos.z, fall = 34 * dt;   // center on the player (camera is Lane B's)
+  for (let i = 0; i < pos.count; i++) {
+    let y = pos.getY(i) - fall;
+    if (y < 0) { y += 38; pos.setX(i, cxp + (Math.random() - 0.5) * 64); pos.setZ(i, czp + (Math.random() - 0.5) * 64); }
+    else { pos.setX(i, pos.getX(i) + 9 * dt); }    // slight wind slant
+    pos.setY(i, y);
+  }
+  pos.needsUpdate = true;
+}
+function updateWorld(dt) {
+  if (!world.sun) return;
+  if (dt > 0 && OF.active) world.t = (world.t + world.speed * dt) % 1;
+  const t = world.t;
+  const ang = (t - 0.25) * Math.PI * 2;
+  const elev = Math.sin(ang);                                      // sun elevation -1..1
+  const smooth = (e0, e1, x) => { const u = _clampW((x - e0) / (e1 - e0), 0, 1); return u * u * (3 - 2 * u); };
+  const day = smooth(-0.12, 0.28, elev);                          // 0 night .. 1 day
+  const warm = _clampW(1 - Math.abs(elev) * 4.5, 0, 1) * (elev > -0.25 ? 1 : 0);   // dawn/dusk orange
+  const night = 1 - day;
+
+  updateWeather(dt);
+  const overcast = (world.weather === 'rain' ? 0.55 : world.weather === 'fog' ? 0.35 : 0) * world.wI;
+
+  // sun arc: rises in +X, overhead at noon, sets in -X; warm at the horizon, near-off at night
+  world.sun.position.set(Math.cos(ang) * 60, Math.max(elev, -0.15) * 70 + 6, 28);
+  _wc1.set(0xff9a3c).lerp(_wc2.set(0xfff3e0), _clampW(elev * 2.2, 0, 1));
+  if (night > 0.6) _wc1.lerp(_wc2.set(0x9fb4d8), (night - 0.6) / 0.4);              // cool moonlight late
+  world.sun.color.copy(_wc1);
+  world.sun.intensity = (0.06 + day * 2.0) * (1 - overcast * 0.7);
+
+  // hemisphere ambient
+  world.hemi.intensity = (0.16 + day * 0.72) * (1 - overcast * 0.4);
+  world.hemi.color.set(0x223046).lerp(_wc2.set(0xbcd2ea), day);
+  world.hemi.groundColor.set(0x14161c).lerp(_wc2.set(0x53503f), day);
+
+  // sky dome
+  world.skyU.topColor.value.set(0x0b1020).lerp(_wc2.set(0x4a73a8), day);
+  _wc1.set(0x161d33).lerp(_wc2.set(0xcfe0ee), day).lerp(_wc2.set(0xf6a85a), warm * 0.85);
+  if (overcast) _wc1.lerp(_wc2.set(0x9aa3ad), overcast * 0.7);
+  world.skyU.horizonColor.value.copy(_wc1);
+
+  // fog + background match the horizon mood; weather pulls the fog in
+  _wc1.set(0x10162a).lerp(_wc2.set(0xb9cbdc), day).lerp(_wc2.set(0xe7a566), warm * 0.6);
+  if (overcast) _wc1.lerp(_wc2.set(0x8b94a0), overcast * 0.6);
+  world.fog.color.copy(_wc1);
+  if (scene.background && scene.background.copy) scene.background.copy(_wc1);
+  const fogFar = world.weather === 'fog' ? 320 + (60 - 320) * world.wI : 320 + (150 - 320) * world.wI * (world.weather === 'rain' ? 1 : 0);
+  world.fog.far = fogFar; world.fog.near = world.weather === 'fog' ? 30 - 18 * world.wI : 30;
+
+  // lamps / lit windows brighten at night (and a touch under heavy overcast)
+  const lampLevel = _clampW(night * 1.15 + overcast * 0.5, 0, 1);
+  for (const L of world.lamps) L.mat.emissiveIntensity = L.base * (L.day + (L.night - L.day) * lampLevel);
+
+  updateRain(dt);
+
+  OF.timeOfDay = t; OF.weather = world.weather; OF.weatherIntensity = world.wI;
+}
+
 function update(dt) {
   resizeIfNeeded();
+  updateWorld(dt);                 // day/night + weather (global lighting; Lane C)
   if (mode === 'drive') updateDriving(dt);
   else updateOnFoot(dt);
 
@@ -2026,7 +2263,7 @@ OF.internals = {
   get camera() { return camera; },
   get renderer() { return renderer; },
   get canvas() { return canvas; },
-  player, keys, peds, vehicles, aabbs,
+  player, keys, peds, vehicles, aabbs, interiors,
   // Clean town-building collider list for Lane D's impact physics: every entry is
   // a solid box from y=0..height with footprint centre (cx,cz) + dims (w,d). The
   // height!=null guard excludes the bank wall footprints that onfoot-heist.js injects
