@@ -765,3 +765,13 @@ body.gta-lowhp #gta-hud::after { opacity: 1; animation: gtaLowHp 1.1s ease-in-ou
 /* once the gta crosshair exists (body.gta-xh set by hud-radar.js), hide the
    legacy on-foot plus-crosshair so the two don't stack. */
 body.gta-xh.gta-active #foot-crosshair { display: none !important; }
+
+/* FIRST-PERSON (body.gta-fp set by onfoot3d.js on the V toggle): a subtle dark
+   edge vignette frames the view, and the crosshair tightens to a tight dot. */
+body.gta-fp #gta-hud::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  background: radial-gradient(ellipse at 50% 50%, rgba(0, 0, 0, 0) 58%, rgba(0, 0, 0, 0.4) 100%);
+}
+body.gta-fp #gta-crosshair { width: 16px; height: 16px; margin: -8px 0 0 -8px; }
+body.gta-fp #gta-crosshair::after { opacity: 0.3; }
+body.gta-fp #foot-crosshair { transform: scale(0.7); opacity: 0.85; }
