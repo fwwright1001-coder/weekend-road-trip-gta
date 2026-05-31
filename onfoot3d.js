@@ -154,16 +154,20 @@ function gunSound() {
 // MESH BUILDERS
 // ============================================================
 // A blocky "generic guy" — low-poly to match the road-trip art. Origin at the
-// feet (Y=0), ~1.8 tall. `armed` adds a pistol in the right hand.
+// feet (Y=0), ~1.8 tall, FACING +Z (so the third-person camera, which sits behind
+// along -dir and looks toward +dir, sees the character's BACK). `armed` builds the
+// full gangster + weapon rig below.
 function buildPerson(colors, armed) {
-  // Rigged, animated model when the (optional) actor art loaded; else the
-  // procedural box-person below. Same contract: feet at origin, ~1.8 tall,
-  // facing +Z, userData.muzzle when armed, walk driven via animateWalk().
-  if (OF._makeActor) {
+  // Peds use the rigged, animated actor art when it loaded (variety + walk anim).
+  // The PLAYER (armed) always uses the procedural model: it's the gangster we can
+  // restyle + hang the modeled weapon rig on, and — unlike the imported Soldier
+  // rig (front = -Z) — it faces +Z, so the player correctly shows their back to
+  // the camera instead of facing it. (Ped/Soldier facing is owned by Lane C.)
+  if (OF._makeActor && !armed) {
     try {
       const a = OF._makeActor({
         armed,
-        colorize: armed ? null : colors.shirt,          // peds tinted toward their shirt colour for variety
+        colorize: colors.shirt,                          // peds tinted toward their shirt colour for variety
         scaleVar: 0.94 + Math.random() * 0.16,
       });
       if (a) return a;
@@ -188,7 +192,10 @@ function buildPerson(colors, armed) {
     geo.translate(0, -(len / 2 + r), 0);
     return geo;
   };
-  const skin = colors.skin, shirt = colors.shirt, pants = colors.pants, hair = colors.hair;
+  let skin = colors.skin, shirt = colors.shirt, pants = colors.pants, hair = colors.hair;
+  // GANGSTER look for the (armed) player: dark hoodie + jeans + black beanie + gold chain.
+  const chainCol = 0xb8982f;
+  if (armed) { shirt = 0x23232c; pants = 0x1b1d24; hair = 0x0e0e12; }
 
   // tiny per-spawn cosmetic variety (build / height)
   const sx = 0.92 + Math.random() * 0.20;   // girth
@@ -257,13 +264,20 @@ function buildPerson(colors, armed) {
   head.scale.set(0.95, 1.08, 1.0);          // slightly squashed / elongated jaw
   head.position.set(0, 2.02, 0);
 
-  // hair cap — scaled sphere clipped to the upper/back skull
-  const cap = mk(new THREE.SphereGeometry(0.172, 16, 14), hair, 0.92);
-  cap.scale.set(1.02, 0.85, 1.05);
-  cap.position.set(0, 0.04, -0.012); head.add(cap);
-  // fringe/bangs over the forehead
-  const bang = mk(new THREE.SphereGeometry(0.10, 12, 8), hair, 0.92);
-  bang.scale.set(1.5, 0.5, 0.6); bang.position.set(0, 0.06, 0.13); head.add(bang);
+  // hair cap — or, for the gangster, a snug knit beanie pulled low over the skull
+  const cap = mk(new THREE.SphereGeometry(0.172, 16, 14), hair, armed ? 0.98 : 0.92);
+  if (armed) { cap.scale.set(1.10, 1.04, 1.12); cap.position.set(0, 0.0, -0.005); }
+  else { cap.scale.set(1.02, 0.85, 1.05); cap.position.set(0, 0.04, -0.012); }
+  head.add(cap);
+  if (armed) {
+    // folded brim ring of the beanie
+    const brim = mk(new THREE.CylinderGeometry(0.178, 0.178, 0.055, 18), hair, 0.95);
+    brim.position.set(0, 0.045, 0); head.add(brim);
+  } else {
+    // fringe/bangs over the forehead
+    const bang = mk(new THREE.SphereGeometry(0.10, 12, 8), hair, 0.92);
+    bang.scale.set(1.5, 0.5, 0.6); bang.position.set(0, 0.06, 0.13); head.add(bang);
+  }
 
   // ears
   const earGeo = new THREE.SphereGeometry(0.045, 8, 8);
@@ -284,6 +298,13 @@ function buildPerson(colors, armed) {
   const browR = mk(browGeo, hair, 0.9); browR.scale.set(1.3, 0.35, 0.5); browR.position.set(0.06, 0.075, 0.15); head.add(browR);
   const nose = mk(limbCapsule(0.028, 0.05), skin); nose.rotation.x = Math.PI; nose.position.set(0, 0.05, 0.155); head.add(nose);
   const mouth = mk(new THREE.SphereGeometry(0.05, 10, 6), 0x7a3b3b, 0.55); mouth.scale.set(1.1, 0.35, 0.4); mouth.position.set(0, -0.085, 0.145); head.add(mouth);
+  if (armed) {
+    // dark wraparound sunglasses (bar + two lens pucks) over the eyes
+    const shades = mk(new THREE.BoxGeometry(0.205, 0.05, 0.03), 0x0a0a0c, 0.25); shades.position.set(0, 0.028, 0.15); head.add(shades);
+    const lensGeo = new THREE.SphereGeometry(0.05, 10, 8);
+    const lensL = mk(lensGeo, 0x101016, 0.12); lensL.scale.set(1.0, 0.78, 0.5); lensL.position.set(-0.062, 0.025, 0.156); head.add(lensL);
+    const lensR = mk(lensGeo, 0x101016, 0.12); lensR.scale.set(1.0, 0.78, 0.5); lensR.position.set(0.062, 0.025, 0.156); head.add(lensR);
+  }
 
   // ============================================================
   // ARMS — animated mesh is the UPPER arm; capsule top sits at the shoulder
@@ -314,17 +335,98 @@ function buildPerson(colors, armed) {
   g.userData.armL = armL; g.userData.armR = armR; g.userData.legL = legL; g.userData.legR = legR;
 
   if (armed) {
-    // raise the right arm forward and clip a little pistol near the right hand
-    armR.position.set(0.27, 1.62, 0.06); armR.rotation.x = -1.35;
-    const gun = new THREE.Group();
-    const slide = mk(new THREE.BoxGeometry(0.08, 0.10, 0.30), 0x222228, 0.45); slide.position.set(0, 0.02, 0.06); gun.add(slide);
-    const barrel = mk(new THREE.CylinderGeometry(0.022, 0.022, 0.10, 8), 0x2a2a30, 0.4);
-    barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.02, 0.24); gun.add(barrel);
-    const grip = mk(new THREE.BoxGeometry(0.07, 0.16, 0.10), 0x18181c, 0.45); grip.position.set(0, -0.10, -0.05); grip.rotation.x = 0.25; gun.add(grip);
-    gun.position.set(0.30, 1.30, 0.5);
-    const muzzle = new THREE.Object3D(); muzzle.position.set(0.30, 1.34, 0.72);
-    g.add(gun, muzzle);
-    g.userData.muzzle = muzzle; g.userData.gun = gun;
+    // ---- gangster accessories: gold chain, hoodie collar + slumped hood ----
+    const chain = mk(new THREE.TorusGeometry(0.115, 0.016, 8, 22), chainCol, 0.25);
+    chain.rotation.x = Math.PI / 2 - 0.30; chain.scale.set(1.05, 1.0, 0.65); chain.position.set(0, 1.46, 0.12);
+    const pend = mk(new THREE.SphereGeometry(0.028, 10, 8), chainCol, 0.2); pend.position.set(0, 1.345, 0.175);
+    const collar = mk(new THREE.TorusGeometry(0.13, 0.05, 8, 18), shirt, 0.9); collar.rotation.x = Math.PI / 2; collar.scale.set(1.0, 1.0, 0.8); collar.position.set(0, 1.80, 0);
+    const hood = mk(new THREE.SphereGeometry(0.16, 12, 10), shirt, 0.92); hood.scale.set(1.1, 0.9, 0.8); hood.position.set(0, 1.80, -0.14);
+    g.add(chain, pend, collar, hood);
+
+    // ============================================================
+    // WEAPON RIG — a full modeled set matching gta/combat.js's loadout
+    // (fists/pistol/ak47/smg/shotgun). Each weapon is a low-poly group held at
+    // a fixed right-hand anchor, barrel along +Z, with a userData.muzzle node at
+    // the barrel tip. setWeapon(id) shows one weapon, points userData.muzzle at
+    // it, and poses the arms (one- vs two-handed). The visible weapon is swapped
+    // by combat.js on weapon change; the built-in path defaults to the pistol.
+    // ============================================================
+    const anchor = new THREE.Object3D();
+    anchor.position.set(0.22, 1.29, 0.30);            // right-hand hold point
+    g.add(anchor);
+    const METAL = 0x202227, METAL2 = 0x33373d, WOOD = 0x5a3a1f, POLY = 0x141418;
+    const weapons = {};
+    const addWeapon = (id, build) => {
+      const w = new THREE.Group();
+      const mz = new THREE.Object3D();
+      build(w, mz);
+      w.add(mz); w.userData.muzzle = mz; w.visible = false;
+      anchor.add(w); weapons[id] = w; return w;
+    };
+
+    // FISTS — no mesh; muzzle just past the knuckles so melee FX has a spot
+    addWeapon('fists', (w, mz) => { mz.position.set(0, 0, 0.18); });
+
+    // PISTOL — slide + short barrel + angled grip
+    addWeapon('pistol', (w, mz) => {
+      w.add(mk(new THREE.BoxGeometry(0.07, 0.085, 0.26), METAL, 0.4));
+      const br = mk(new THREE.CylinderGeometry(0.018, 0.018, 0.08, 8), METAL2, 0.35); br.rotation.x = Math.PI / 2; br.position.set(0, 0.012, 0.17); w.add(br);
+      const grip = mk(new THREE.BoxGeometry(0.06, 0.15, 0.085), POLY, 0.5); grip.position.set(0, -0.11, -0.055); grip.rotation.x = 0.22; w.add(grip);
+      mz.position.set(0, 0.012, 0.225);
+    });
+
+    // AK-47 — long receiver, wood foregrip + stock, curved magazine, front sight
+    addWeapon('ak47', (w, mz) => {
+      w.add(mk(new THREE.BoxGeometry(0.06, 0.07, 0.5), METAL, 0.4));
+      const fore = mk(new THREE.BoxGeometry(0.062, 0.072, 0.16), WOOD, 0.7); fore.position.set(0, 0, 0.17); w.add(fore);
+      const mag = mk(new THREE.BoxGeometry(0.05, 0.21, 0.10), 0x2a2a30, 0.5); mag.position.set(0, -0.14, -0.02); mag.rotation.x = -0.45; w.add(mag);
+      const grip = mk(new THREE.BoxGeometry(0.05, 0.13, 0.07), POLY, 0.5); grip.position.set(0, -0.10, -0.16); grip.rotation.x = 0.3; w.add(grip);
+      const stock = mk(new THREE.BoxGeometry(0.05, 0.075, 0.22), WOOD, 0.7); stock.position.set(0, -0.02, -0.34); w.add(stock);
+      const sight = mk(new THREE.BoxGeometry(0.012, 0.045, 0.02), METAL2, 0.4); sight.position.set(0, 0.06, 0.22); w.add(sight);
+      mz.position.set(0, 0.0, 0.42);
+    });
+
+    // SMG — compact body, straight mag, short folding stock stub
+    addWeapon('smg', (w, mz) => {
+      w.add(mk(new THREE.BoxGeometry(0.06, 0.09, 0.30), METAL, 0.4));
+      const mag = mk(new THREE.BoxGeometry(0.045, 0.18, 0.07), 0x2a2a30, 0.5); mag.position.set(0, -0.13, 0.02); w.add(mag);
+      const grip = mk(new THREE.BoxGeometry(0.05, 0.12, 0.07), POLY, 0.5); grip.position.set(0, -0.10, -0.10); grip.rotation.x = 0.25; w.add(grip);
+      const stock = mk(new THREE.BoxGeometry(0.04, 0.05, 0.14), METAL2, 0.45); stock.position.set(0, 0, -0.24); w.add(stock);
+      mz.position.set(0, 0.012, 0.26);
+    });
+
+    // SHOTGUN — thick barrel + pump under it, receiver, wood grip + stock
+    addWeapon('shotgun', (w, mz) => {
+      const barrel = mk(new THREE.CylinderGeometry(0.028, 0.028, 0.5, 10), METAL, 0.35); barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.03, 0.16); w.add(barrel);
+      const pump = mk(new THREE.BoxGeometry(0.06, 0.05, 0.16), POLY, 0.6); pump.position.set(0, -0.04, 0.12); w.add(pump);
+      const recv = mk(new THREE.BoxGeometry(0.06, 0.08, 0.18), METAL, 0.4); recv.position.set(0, 0, -0.06); w.add(recv);
+      const grip = mk(new THREE.BoxGeometry(0.05, 0.11, 0.07), WOOD, 0.7); grip.position.set(0, -0.09, -0.12); grip.rotation.x = 0.3; w.add(grip);
+      const stock = mk(new THREE.BoxGeometry(0.05, 0.09, 0.22), WOOD, 0.7); stock.position.set(0, -0.01, -0.30); w.add(stock);
+      mz.position.set(0, 0.03, 0.42);
+    });
+
+    // arm poses per weapon family — [rotX,rotY,rotZ] + [posX,posY,posZ]; the gun
+    // rides the anchor, so these just make the hands read as gripping it.
+    const POSE = {
+      fists:   { aR: [-0.55, 0.15, 0.10], pR: [0.27, 1.52, 0.04], aL: [-0.55, -0.15, -0.10], pL: [-0.27, 1.52, 0.04], two: true },
+      pistol:  { aR: [-1.28, 0.12, 0.05], pR: [0.22, 1.50, 0.06], aL: [-0.45, 0.05, 0.0], pL: [-0.27, 1.66, 0.0], two: false },
+      ak47:    { aR: [-1.30, 0.12, 0.05], pR: [0.22, 1.50, 0.05], aL: [-1.35, -0.65, 0.10], pL: [-0.16, 1.50, 0.12], two: true },
+      smg:     { aR: [-1.30, 0.12, 0.05], pR: [0.22, 1.50, 0.05], aL: [-1.28, -0.55, 0.10], pL: [-0.16, 1.50, 0.08], two: true },
+      shotgun: { aR: [-1.30, 0.12, 0.05], pR: [0.22, 1.50, 0.05], aL: [-1.35, -0.65, 0.10], pL: [-0.14, 1.50, 0.14], two: true },
+    };
+    const setWeapon = (id) => {
+      if (!weapons[id]) id = 'pistol';
+      for (const k in weapons) weapons[k].visible = (k === id);
+      g.userData.muzzle = weapons[id].userData.muzzle;
+      g.userData.gun = weapons[id];
+      g.userData.weapon = id;
+      const p = POSE[id] || POSE.pistol;
+      armR.position.set(p.pR[0], p.pR[1], p.pR[2]); armR.rotation.set(p.aR[0], p.aR[1], p.aR[2]);
+      armL.position.set(p.pL[0], p.pL[1], p.pL[2]); armL.rotation.set(p.aL[0], p.aL[1], p.aL[2]);
+    };
+    g.userData.weapons = weapons;
+    g.userData.setWeapon = setWeapon;
+    setWeapon('pistol');   // default in-hand weapon (built-in fire path uses this)
   }
 
   // subtle per-spawn body-shape variety (scale the whole rig; feet stay at Y=0)
@@ -649,13 +751,14 @@ function ensureInit() {
   // pedestrians
   for (let i = 0; i < NPC_COUNT; i++) spawnPed(rng, true);
 
-  // tracer line + muzzle flash
+  // tracer line + muzzle flash (built-in pistol path; combat.js draws its own).
+  // Additive blending gives the line a bright, hot read; the flash pops + fades.
   const tg = new THREE.BufferGeometry();
   tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-  tracer = new THREE.Line(tg, new THREE.LineBasicMaterial({ color: 0xfff2a0, transparent: true, opacity: 0 }));
+  tracer = new THREE.Line(tg, new THREE.LineBasicMaterial({ color: 0xfff2a0, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
   tracer.frustumCulled = false; scene.add(tracer);
-  muzzleFlash = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8),
-    new THREE.MeshBasicMaterial({ color: 0xffe27a, transparent: true, opacity: 0 }));
+  muzzleFlash = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffe27a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
   scene.add(muzzleFlash);
 
   resize();
@@ -842,8 +945,8 @@ function fire() {
   pa.setXYZ(0, muzzleWorld.x, muzzleWorld.y, muzzleWorld.z);
   pa.setXYZ(1, end.x, end.y, end.z);
   pa.needsUpdate = true;
-  tracer.material.opacity = 0.9; tracerT = 0.06;
-  muzzleFlash.position.copy(muzzleWorld); muzzleFlash.material.opacity = 1; flashT = 0.05;
+  tracer.material.opacity = 1.0; tracerT = 0.07;
+  muzzleFlash.position.copy(muzzleWorld); muzzleFlash.material.opacity = 1; muzzleFlash.scale.setScalar(1.4); flashT = 0.06;
 
   // let an optional systems layer (police) claim the shot first if a cop is
   // closer than the pedestrian, so a single bullet hits exactly one target.
@@ -1041,9 +1144,10 @@ function update(dt) {
   // pedestrians live whether you're on foot or cruising past
   for (const p of peds) updatePed(p, dt);
 
-  // visual timers (tracer / muzzle flash)
-  if (tracerT > 0) { tracerT -= dt; if (tracerT <= 0) tracer.material.opacity = 0; }
-  if (flashT > 0) { flashT -= dt; if (flashT <= 0) muzzleFlash.material.opacity = 0; }
+  // visual timers (tracer / muzzle flash) — fade the tracer out and shrink+fade
+  // the flash so each shot reads as a quick bright pop with a fading tail.
+  if (tracerT > 0) { tracerT -= dt; tracer.material.opacity = Math.max(0, tracerT / 0.07); if (tracerT <= 0) tracer.material.opacity = 0; }
+  if (flashT > 0) { flashT -= dt; const fk = Math.max(0, flashT / 0.06); muzzleFlash.material.opacity = fk; muzzleFlash.scale.setScalar(0.6 + fk * 0.9); if (flashT <= 0) muzzleFlash.material.opacity = 0; }
 
   if (OF.onTick) OF.onTick(dt);   // optional systems layer (gta/onfoot-bridge.js)
 }
