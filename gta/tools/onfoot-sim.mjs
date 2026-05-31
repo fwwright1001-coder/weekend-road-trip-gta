@@ -104,6 +104,28 @@ const ctx = GTA.ctx;
 const heist = M(ctx);
 if (!heist) { console.error('heist/missions provider missing'); }
 
+// ---------- round-2 wiring asserts: physics + first-person bridge routing -----
+// The bridge should have wired both host hooks; exercise them once here so the
+// e2e sim guards the integration too (physics-check covers the pure algorithm).
+(() => {
+  if (typeof window.ONFOOT.carImpact !== 'function') return console.error('[assert] bridge did not wire OF.carImpact');
+  if (typeof window.ONFOOT.onFpToggle !== 'function') return console.error('[assert] bridge did not wire OF.onFpToggle');
+  // carImpact routes to gta/physics.js → mutates the vehicle + emits a crash
+  const car = { pos: { x: 0, y: 0, z: 0 }, heading: 0, speed: 28, mesh: {} };
+  let crashed = false; const offC = GTA.bus.on('fx:crash', () => { crashed = true; });
+  window.ONFOOT.carImpact(car, { speed: 28, dt: 1 / 60, dirx: 0, dirz: 1, intended: 28 / 60, moved: 0, pushX: 0, pushZ: -28 / 60 });
+  offC();
+  if (!(Math.abs(car.speed) < 28)) console.error('[assert] OF.carImpact did not reduce speed: ' + car.speed);
+  if (!crashed) console.error('[assert] OF.carImpact did not emit fx:crash');
+  // first-person toggle emits fp:toggle + mirrors onto ctx
+  let fp = null; const offF = GTA.bus.on('fp:toggle', (p) => { fp = p; });
+  window.ONFOOT.onFpToggle(true);
+  if (!fp || fp.firstPerson !== true || ctx.firstPerson !== true) console.error('[assert] onFpToggle(true) routing failed');
+  window.ONFOOT.onFpToggle(false);
+  if (!fp || fp.firstPerson !== false) console.error('[assert] onFpToggle(false) routing failed');
+  offF();
+})();
+
 // ---------- the autonomous driver ----------
 const DT = 1 / 60;
 const stats = { won: false, frames: 0, peakStars: 0, peakCops: 0, minHealth: 100, copKills: 0, shots: 0, wasted: 0, money: 0 };

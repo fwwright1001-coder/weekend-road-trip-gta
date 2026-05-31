@@ -12,6 +12,7 @@
     "aim-check": "node tools/aim-check.mjs",
     "actor-check": "node tools/actor-check.mjs",
     "collision-probe": "node tools/collision-probe.mjs",
+    "physics-check": "node tools/physics-check.mjs",
     "scene-stats": "node tools/scene-stats.mjs"
   },
   "devDependencies": {

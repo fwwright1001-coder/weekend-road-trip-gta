@@ -42,6 +42,7 @@ const THREE_INSTALLED = existsSync(path.join(GTA, 'node_modules', 'three'));
 const CHECKS = [
   { name: 'mesh-check',      file: 'mesh-check.mjs',      what: 'procedural person/car meshes honor their contracts' },
   { name: 'collision-probe', file: 'collision-probe.mjs', what: 'real resolveCollision holds the bank walls (no tunneling)' },
+  { name: 'physics-check',   file: 'physics-check.mjs',   what: 'car-vs-building impact: speed loss + crash events + FP wiring' },
   { name: 'scene-stats',     file: 'scene-stats.mjs',     what: 'full scene builds headlessly (draw-call audit)' },
   { name: 'aim-check',       file: 'aim-check.mjs',       what: 'gun/aim rig wires to the Soldier skeleton',
     need: SOLDIER, needLabel: 'assets/models/Soldier.glb (Lane A)' },
