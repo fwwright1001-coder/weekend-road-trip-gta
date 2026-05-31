@@ -95,6 +95,9 @@ window.ONFOOT = { active: true, ready: true, unlocked: () => true, enter: noop, 
 
 const { GTA } = await import('../core.js');
 await import('../onfoot-bridge.js');   // installs hooks + boots (active=true)
+// let the bridge's async optional module loads settle before driving frames, so
+// the sim exercises gta/fx.js (Lane B) once it exists (no-ops while it doesn't).
+try { if (window.ONFOOT.fxReady) await window.ONFOOT.fxReady; } catch (e) {}
 
 const M = ctx0 => ctx0.systems.missions && ctx0.systems.missions.api;  // heist registered as 'missions'
 const ctx = GTA.ctx;

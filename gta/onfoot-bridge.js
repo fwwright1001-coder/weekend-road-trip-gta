@@ -15,6 +15,9 @@
 // Reuses unchanged: core.js, wanted.js, economy.js, police.js, hud-radar.js,
 //   combat.js. The heist (gta/onfoot-heist.js) registers as the HUD's
 //   'missions' provider. World + vehicles are adapted by thin shims below.
+//   gta/fx.js (Lane B's particle/screen-FX layer) is OPTIONALLY loaded via
+//   loadFx() — defensive, so it no-ops until that module exists (see the FX
+//   MODULE SEAM section for the contract).
 // ============================================================
 import { GTA, GU } from './core.js';
 import './wanted.js';
@@ -37,6 +40,7 @@ let _lastPx = null, _lastPy = null, _lastPz = null;   // prior player pos -> vel
 let _shakeMag = 0, _flashEl = null;
 let _detailBuilt = false;
 let _realism = null, _realismBuilt = false;   // post-FX + textures pipeline (browser only)
+let _fxLoaded = false;                         // gta/fx.js (Lane B) — optional particle/FX module
 
 // ---- real input state (fed to combat.js) -----------------------------------
 let _mouseDown = false, _mouseWired = false;
@@ -143,6 +147,7 @@ function buildCtx() {
   };
   ctx = {
     THREE,
+    headless: !!I.headless,   // true under the node sim — systems (e.g. fx) guard browser-only work on this
     get scene() { return I.scene; }, get camera() { return I.camera; }, get renderer() { return I.renderer; },
     player,
     input: {
@@ -260,6 +265,48 @@ function applyShake(dt) {
 }
 
 // ============================================================
+// FX MODULE SEAM — gta/fx.js (Lane B's particle / screen-FX layer)
+// ------------------------------------------------------------
+// Optional, loaded the same defensive way as the realism pipeline: dynamic-
+// imported + fully try/caught, so the GTA layer runs fine whether or not fx.js
+// exists yet (today it doesn't — Lane B ships it). The MOMENT it lands, this
+// wires it with no further changes here.
+//
+// CONTRACT (also in REQUESTS.md so Lane B has it):
+//   * fx.js EITHER self-registers a system on import via
+//       GTA.register({ name:'fx', init(ctx), update(dt,ctx), reset(ctx) })   ← preferred
+//     OR exports install(ctx, GTA) (named or default) which we call here.
+//   * It reads ctx.scene / ctx.camera / ctx.THREE and reacts to GTA.bus events:
+//       existing — 'entityKilled', 'crime'(kind:'gunfire'), 'playerHurt', 'shake'
+//       optional  — the fx:* family (see core.js catalog): fx:muzzle / fx:impact /
+//                   fx:explosion / fx:spawn, emitted by combat.js (Lane A) when it
+//                   has the precise barrel/impact point.
+//   * It MUST be headless-safe: build scene meshes only; guard any DOM / WebGL-
+//     context work behind `ctx.headless` so the node sim exercises it.
+//   * It MUST NOT set OF.renderHook (reserved for the realism composer). Per-frame
+//     work belongs in update(dt,ctx), which the host calls before the render hook.
+// Unlike the realism pipeline, fx loads even headless, so onfoot-sim covers it.
+function loadFx(ctx) {
+  if (_fxLoaded) return Promise.resolve();
+  _fxLoaded = true;
+  return import('./fx.js').then((mod) => {
+    try {
+      const install = mod && (mod.install || (typeof mod.default === 'function' ? mod.default : null));
+      if (install) install(ctx, GTA);
+      else if (mod && mod.default && mod.default.name && GTA.register) GTA.register(mod.default);
+      // else: the module self-registered via GTA.register on import — nothing to do.
+      if (GTA.systems.fx) console.info('[GTA bridge] fx layer loaded');
+    } catch (e) { console.warn('[GTA] fx.js found but install failed; running without particle FX', e); }
+  }).catch((e) => {
+    // a missing module is the expected state until Lane B lands fx.js — stay quiet.
+    const m = String((e && (e.code || e.message)) || e);
+    if (!/Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (fetch|load)|Error resolving module/i.test(m)) {
+      console.warn('[GTA] fx.js present but failed to load', e);
+    }
+  });
+}
+
+// ============================================================
 // PICKUPS — guns (bridge) + ammo/health/armor (economy)
 // ============================================================
 function buildGunPickup(id, x, z) {
@@ -364,6 +411,10 @@ function onEnter() {
       if (c) { c.giveWeapon('pistol', true); c.giveWeapon('ak47', false); }
       ctx.player.health = ctx.player.maxHealth; ctx.player.armor = 100;
       placePickups();
+      // optional Lane-B particle/FX layer; no-op until gta/fx.js lands. The
+      // promise is exposed so headless harnesses (onfoot-sim) can await the async
+      // module load before driving frames — otherwise it covers fx for free.
+      OF.fxReady = loadFx(ctx);
     } else {
       _lastPx = _lastPy = _lastPz = null;
       ctx.player.health = ctx.player.maxHealth; ctx.player.alive = true;

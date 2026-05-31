@@ -72,6 +72,13 @@ if (typeof window !== 'undefined') window.GTA = GTA;
 //   mission:failed   {id, reason}
 //   toast            {html, ms}                        request the HUD show a message
 //   shake            {amount}                          request a camera shake
+//   --- fx:* — optional one-shot visual-FX requests (gta/fx.js, Lane B, subscribes;
+//       combat.js / the bridge emit them where they know the exact point). Dormant
+//       and harmless until a subscriber exists (emit() no-ops with no listeners). ---
+//   fx:muzzle        {pos, dir, weapon?}               muzzle flash + smoke at the barrel
+//   fx:impact        {pos, normal?, surface?}          bullet hit: spark/debris puff
+//   fx:explosion     {pos, radius?}                    vehicle/explosive blast
+//   fx:spawn         {pos, kind?, color?}              generic one-shot particle burst
 // ============================================================
 function makeBus() {
   const map = new Map();          // type -> Set<fn>
