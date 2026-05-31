@@ -699,3 +699,69 @@ body.colorblind {
    (our HUD shows weapon/ammo + money). Robust against onfoot3d.updateHud() which
    only toggles the element's own .hidden class, never the <body> class. */
 body.gta-active #foot-stats-foot { display: none !important; }
+
+/* ============================================================
+   Lane B polish: HUD state feedback (low health, low/empty ammo, weapon swap)
+   + the GTA crosshair (hipfire vs aim). All state classes are toggled by
+   gta/hud-radar.js; deduped there so they don't thrash.
+   ============================================================ */
+
+/* subtle gloss on the vitals bars so they don't read flat */
+.gta-bar { position: relative; }
+.gta-bar i { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22); }
+
+/* LOW HEALTH — pulse the bar and bleed a red vignette in from the screen edges */
+.gta-bar.low { box-shadow: 0 0 0 1px rgba(226, 85, 85, 0.55), 0 1px 3px rgba(0, 0, 0, 0.6); }
+.gta-bar.low i { animation: gtaHpPulse 0.85s ease-in-out infinite; }
+@keyframes gtaHpPulse { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.7); } }
+#gta-hud::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0;
+  transition: opacity .35s ease;
+  background: radial-gradient(ellipse at 50% 60%, rgba(200, 22, 22, 0) 56%, rgba(200, 22, 22, 0.36) 100%);
+}
+body.gta-lowhp #gta-hud::after { opacity: 1; animation: gtaLowHp 1.1s ease-in-out infinite; }
+@keyframes gtaLowHp { 0%, 100% { opacity: 0.34; } 50% { opacity: 0.72; } }
+
+/* AMMO — amber when low, flashing red when empty */
+.gta-ammo.low { color: #f5c14f; }
+.gta-ammo.empty { animation: gtaAmmoEmpty 0.6s steps(2) infinite; }
+@keyframes gtaAmmoEmpty { 50% { color: #ff7a7a; } }
+
+/* WEAPON — a quick pop when you switch weapons */
+.gta-weaponbox { transform-origin: right bottom; }
+.gta-weapon.swap { animation: gtaWeaponSwap .35s ease; }
+@keyframes gtaWeaponSwap {
+  0% { transform: scale(1); color: #fff; }
+  35% { transform: scale(1.16); color: #f5d76e; }
+  100% { transform: scale(1); }
+}
+
+/* CROSSHAIR — a ring + centre dot. Hipfire is open; .aim tightens it; .empty
+   reddens it. The element (#gta-crosshair) is added to index.html by Lane D;
+   until then these rules simply match nothing. */
+#gta-crosshair {
+  position: absolute; left: 50%; top: 50%;
+  width: 26px; height: 26px; margin: -13px 0 0 -13px;
+  pointer-events: none; z-index: 22;
+  --xh: rgba(255, 255, 255, 0.88);
+  transition: width .12s ease, height .12s ease, margin .12s ease, opacity .1s ease;
+}
+#gta-crosshair.hidden { display: none; }
+#gta-crosshair::after {                 /* ring */
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid var(--xh); opacity: 0.55;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.85), inset 0 0 2px rgba(0, 0, 0, 0.6);
+}
+#gta-crosshair::before {                /* centre dot */
+  content: ""; position: absolute; left: 50%; top: 50%;
+  width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px; border-radius: 50%;
+  background: var(--xh); box-shadow: 0 0 3px rgba(0, 0, 0, 0.95);
+}
+#gta-crosshair.aim {                    /* aiming down → tight reticle */
+  width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px;
+}
+#gta-crosshair.aim::after { opacity: 0.95; border-width: 1px; }
+#gta-crosshair.empty { --xh: #ff5a5a; } /* out of ammo */
+/* once the gta crosshair exists (body.gta-xh set by hud-radar.js), hide the
+   legacy on-foot plus-crosshair so the two don't stack. */
+body.gta-xh.gta-active #foot-crosshair { display: none !important; }

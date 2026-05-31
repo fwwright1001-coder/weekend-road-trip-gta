@@ -44,6 +44,7 @@ const COL_PLAYER = '#ffffff';
 const WEAPON_NAMES = {
   fists: 'FISTS',
   pistol: 'PISTOL',
+  ak47: 'AK-47',
   smg: 'SMG',
   shotgun: 'SHOTGUN',
   rifle: 'RIFLE',
@@ -91,6 +92,11 @@ const sys = {
   _healthWidthShown: -1,
   _armorWidthShown: -1,
   _crosshairHiddenShown: null,
+  _lowHpShown: null,            // dedupe body.gta-lowhp + health-bar .low toggling
+  _ammoLowShown: null,          // dedupe ammo .low toggling
+  _weaponSwapUntil: 0,          // ctx.time.t at which to remove the weapon .swap flash
+  _crosshairAimShown: null,     // dedupe crosshair .aim toggling
+  _crosshairEmptyShown: null,   // dedupe crosshair .empty toggling
 
   _unsubs: [],
 
@@ -109,6 +115,11 @@ const sys = {
       el.crosshair = d.getElementById('gta-crosshair');
       el.toast = d.getElementById('gta-toast');
       el.radar = d.getElementById('gta-radar');
+
+      // If Lane D has added our dedicated #gta-crosshair, flag the body so CSS
+      // can suppress the legacy on-foot plus-crosshair (no double reticle). When
+      // the element is absent we leave the legacy crosshair alone — no regression.
+      if (el.crosshair && d.body) d.body.classList.add('gta-xh');
 
       // build the 5 star spans exactly once
       if (el.stars && !this._builtStars) {
@@ -169,6 +180,16 @@ const sys = {
     this._healthWidthShown = -1;
     this._armorWidthShown = -1;
     this._crosshairHiddenShown = null;
+    this._weaponSwapUntil = 0;
+    this._crosshairAimShown = null;
+    this._crosshairEmptyShown = null;
+    // clear low-state classes outright (respawn restores full health/ammo)
+    if (typeof document !== 'undefined') document.body.classList.remove('gta-lowhp');
+    if (el.healthFill && el.healthFill.parentElement) el.healthFill.parentElement.classList.remove('low');
+    if (el.weapon) el.weapon.classList.remove('swap');
+    if (el.ammo) el.ammo.classList.remove('low');
+    this._lowHpShown = null;
+    this._ammoLowShown = null;
   },
 
   // --------------------------------------------------------
@@ -280,6 +301,17 @@ const sys = {
         el.healthFill.style.width = pct + '%';
         this._healthWidthShown = pct;
       }
+      // low-health feedback: pulse the bar + a red screen-edge vignette (CSS).
+      // Evaluated every frame (independent threshold), deduped on the boolean.
+      const low = pct <= 25 && player.alive !== false;
+      if (low !== this._lowHpShown) {
+        const bar = el.healthFill.parentElement;
+        if (bar) { if (low) bar.classList.add('low'); else bar.classList.remove('low'); }
+        if (typeof document !== 'undefined') {
+          if (low) document.body.classList.add('gta-lowhp'); else document.body.classList.remove('gta-lowhp');
+        }
+        this._lowHpShown = low;
+      }
     }
     if (el.armorFill) {
       const a = (typeof player.armor === 'number') ? player.armor : 0;
@@ -322,9 +354,16 @@ const sys = {
       melee = MELEE_IDS.has(id);
     }
 
+    const t = (ctx.time && ctx.time.t) || 0;
     if (el.weapon && name !== this._weaponNameShown) {
+      const first = this._weaponNameShown === null;   // don't flash the initial paint
       el.weapon.textContent = name || 'FISTS';
       this._weaponNameShown = name || 'FISTS';
+      if (!first) { el.weapon.classList.add('swap'); this._weaponSwapUntil = t + 0.35; }   // brief pop on swap
+    }
+    if (this._weaponSwapUntil && t >= this._weaponSwapUntil) {
+      if (el.weapon) el.weapon.classList.remove('swap');
+      this._weaponSwapUntil = 0;
     }
 
     if (el.ammo) {
@@ -337,6 +376,12 @@ const sys = {
       if (empty !== this._ammoEmptyShown) {
         if (empty) el.ammo.classList.add('empty'); else el.ammo.classList.remove('empty');
         this._ammoEmptyShown = empty;
+      }
+      // low (but not empty) clip → amber warning to prompt a reload
+      const low = !melee && clip > 0 && clip <= 5;
+      if (low !== this._ammoLowShown) {
+        if (low) el.ammo.classList.add('low'); else el.ammo.classList.remove('low');
+        this._ammoLowShown = low;
       }
     }
   },
@@ -385,12 +430,12 @@ const sys = {
     const input = ctx.input;
     const locked = !!(input && input.pointerLocked);
 
-    let melee = true;
+    let melee = true, clipEmpty = false;
     const combat = this._api(ctx, 'combat');
     if (combat && typeof combat.currentWeapon === 'function') {
       let w = null;
       try { w = combat.currentWeapon(); } catch (e) { w = null; }
-      if (w && typeof w === 'object') melee = !!w.melee;
+      if (w && typeof w === 'object') { melee = !!w.melee; clipEmpty = !melee && w.clip === 0; }
       else {
         const id = (ctx.player && typeof ctx.player.weapon === 'string') ? ctx.player.weapon : 'fists';
         melee = MELEE_IDS.has(id);
@@ -405,6 +450,17 @@ const sys = {
     if (hidden !== this._crosshairHiddenShown) {
       if (hidden) el.crosshair.classList.add('hidden'); else el.crosshair.classList.remove('hidden');
       this._crosshairHiddenShown = hidden;
+    }
+    // crosshair STATE: tighten when aiming down (shared window.ONFOOT.aiming flag),
+    // tint red when the clip is empty. Both deduped; harmless if D hasn't wired aim.
+    const aiming = typeof window !== 'undefined' && !!(window.ONFOOT && window.ONFOOT.aiming);
+    if (aiming !== this._crosshairAimShown) {
+      if (aiming) el.crosshair.classList.add('aim'); else el.crosshair.classList.remove('aim');
+      this._crosshairAimShown = aiming;
+    }
+    if (clipEmpty !== this._crosshairEmptyShown) {
+      if (clipEmpty) el.crosshair.classList.add('empty'); else el.crosshair.classList.remove('empty');
+      this._crosshairEmptyShown = clipEmpty;
     }
   },
 
