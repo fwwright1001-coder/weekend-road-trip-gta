@@ -476,6 +476,20 @@ function buildPerson(colors, armed) {
       mz.position.set(0, 0.03, 0.42); ej.position.set(0.045, 0.0, -0.04);
     });
 
+    // GRENADE — low-poly frag: olive ovoid body + pineapple grooves + fuze cap +
+    // safety spoon + pull-ring. muzzle = THROW ORIGIN above/ahead of the hand so the
+    // projectile spawns clear of the body; eject unused (no casing).
+    addWeapon('grenade', (w, mz, ej) => {
+      const OLIVE = 0x3f4a2a, DARKOLIVE = 0x2c3420;
+      const body = mk(new THREE.SphereGeometry(0.078, 12, 10), OLIVE, 0.75);
+      body.scale.set(0.9, 1.15, 0.9); body.position.set(0, 0, 0.02); w.add(body);
+      for (const gy of [-0.035, 0, 0.035]) { const ring = mk(new THREE.TorusGeometry(0.072, 0.009, 6, 14), DARKOLIVE, 0.8); ring.rotation.x = Math.PI / 2; ring.position.set(0, gy, 0.02); w.add(ring); }
+      const cap = mk(new THREE.CylinderGeometry(0.03, 0.034, 0.045, 10), METAL2, 0.4); cap.position.set(0, 0.09, 0.02); w.add(cap);
+      const spoon = mk(new THREE.BoxGeometry(0.016, 0.085, 0.03), CHROME, 0.3); spoon.position.set(0.04, 0.07, 0.02); spoon.rotation.z = 0.14; w.add(spoon);   // safety lever
+      const pull = mk(new THREE.TorusGeometry(0.022, 0.006, 6, 12), CHROME, 0.25); pull.position.set(-0.035, 0.105, 0.02); pull.rotation.y = Math.PI / 2; w.add(pull);   // pull ring
+      mz.position.set(0, 0.12, 0.10); ej.position.set(0, 0, 0.05);
+    });
+
     // arm poses per weapon family — [rotX,rotY,rotZ] + [posX,posY,posZ]; the gun
     // rides the anchor, so these just make the hands read as gripping it.
     const POSE = {
@@ -484,6 +498,7 @@ function buildPerson(colors, armed) {
       ak47:    { aR: [-1.30, 0.12, 0.05], pR: [0.22, 1.50, 0.05], aL: [-1.35, -0.65, 0.10], pL: [-0.16, 1.50, 0.12], two: true },
       smg:     { aR: [-1.30, 0.12, 0.05], pR: [0.22, 1.50, 0.05], aL: [-1.28, -0.55, 0.10], pL: [-0.16, 1.50, 0.08], two: true },
       shotgun: { aR: [-1.30, 0.12, 0.05], pR: [0.22, 1.50, 0.05], aL: [-1.35, -0.65, 0.10], pL: [-0.14, 1.50, 0.14], two: true },
+      grenade: { aR: [-1.55, 0.10, 0.05], pR: [0.22, 1.52, 0.02], aL: [-0.45, 0.05, 0.0], pL: [-0.27, 1.66, 0.0], two: false },   // cocked-back lob
     };
     const setWeapon = (id) => {
       if (!weapons[id]) id = 'pistol';
@@ -846,6 +861,124 @@ function spawnVehicle(x, z, heading, color) {
   const v = { mesh: group, wheels, steerPivots, pos: new THREE.Vector3(x, 0, z), heading, speed: 0, occupied: false };
   vehicles.push(v);
   return v;
+}
+
+// ============================================================
+// HEALTH / ARMOR PICKUP MESHES (Lane A provides the MESH + a spawn factory; Lane D
+// owns placement/bob-spin/collection/respawn — see REQUESTS A→D). buildPickupMesh is
+// self-contained (THREE + locals only): origin at ground (y=0), art ~1.05u tall, with
+// userData.spin = the icon group to rotate and userData.glow = the upright pillar.
+// ============================================================
+function buildPickupMesh(kind) {
+  const g = new THREE.Group();
+  g.name = 'of-pickup-' + kind;
+  const mkp = (geo, col, opts) => new THREE.Mesh(geo, new THREE.MeshStandardMaterial(Object.assign({ color: col, roughness: 0.4, metalness: 0.3 }, opts || {})));
+  const baseCol = kind === 'armor' ? 0x3f7adf : 0xdd3b3b;   // match economy's palette
+  const disc = mkp(new THREE.CylinderGeometry(0.42, 0.5, 0.06, 24), 0x14161c, { roughness: 0.6 }); disc.position.y = 0.05; g.add(disc);
+  const halo = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.46, 1.1, 18, 1, true),
+    new THREE.MeshBasicMaterial({ color: baseCol, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false }));
+  halo.position.y = 0.6; g.add(halo);
+  const icon = new THREE.Group(); icon.position.y = 0.66; g.add(icon);   // the part the owner spins
+  if (kind === 'armor') {
+    const plate = mkp(new THREE.IcosahedronGeometry(0.34, 0), 0x3f7adf, { emissive: 0x16315f, emissiveIntensity: 0.7, metalness: 0.5 }); plate.scale.set(1, 1.2, 0.5); icon.add(plate);
+    const rim = mkp(new THREE.TorusGeometry(0.34, 0.05, 8, 22), 0xe8eef6, { emissive: 0x9fb8e0, emissiveIntensity: 0.5 }); rim.scale.set(1, 1.2, 0.5); icon.add(rim);
+    const strap = mkp(new THREE.BoxGeometry(0.5, 0.08, 0.1), 0x1b2433); strap.position.z = 0.16; icon.add(strap);
+  } else {
+    const cv = mkp(new THREE.BoxGeometry(0.16, 0.56, 0.16), 0xdd3b3b, { emissive: 0x701414, emissiveIntensity: 0.8 }); icon.add(cv);
+    const ch = mkp(new THREE.BoxGeometry(0.56, 0.16, 0.16), 0xdd3b3b, { emissive: 0x701414, emissiveIntensity: 0.8 }); icon.add(ch);
+    const back = mkp(new THREE.BoxGeometry(0.46, 0.46, 0.1), 0xf4f4f4, { emissive: 0x808080, emissiveIntensity: 0.3 }); back.position.z = -0.06; icon.add(back);
+  }
+  g.traverse((o) => { if (o.isMesh && o.material && o.material.metalness !== undefined) o.castShadow = true; });
+  g.userData = { kind, spin: icon, glow: halo };
+  return g;
+}
+// records of A-built pickups; D drives bob/spin/collect/respawn against this array.
+const aPickups = [];
+function spawnPickupMesh(kind, x, z) {
+  const g = buildPickupMesh(kind);
+  g.position.set(x, 0, z);
+  if (scene) scene.add(g);
+  const rec = { mesh: g, kind, pos: new THREE.Vector3(x, 0, z), taken: false };
+  aPickups.push(rec);
+  return rec;
+}
+
+// ============================================================
+// NPC TRAFFIC CARS (Lane A provides civilian meshes + a spawn factory + the traffic[]
+// array; Lane D writes the driving AI in gta/traffic.js — see REQUESTS A→D). Same
+// { group, wheels[4], steerPivots[2] } contract + nose-+Z convention as buildCarMesh,
+// so D's updateDriving-style integrator drives them nose-first with no rotation hack.
+// buildNpcCarMesh is self-contained (THREE + locals + PI only).
+// ============================================================
+function buildNpcCarMesh(opts) {
+  const o = opts || {}; const PI = Math.PI;
+  const kind = o.kind || 'sedan';                 // 'sedan' | 'van' | 'taxi'
+  const bodyColor = (o.color != null) ? o.color : (kind === 'taxi' ? 0xf4c20d : 0x9aa3ad);
+  const g = new THREE.Group();
+  // MATTE civilian paint (low metalness, NO clearcoat) — never reads like the supercar
+  const paint = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.6, metalness: 0.2 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x15151a, roughness: 0.7 });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x9fc4d8, roughness: 0.2, metalness: 0.0, transparent: true, opacity: 0.55 });
+  const chrome = new THREE.MeshStandardMaterial({ color: 0xc8ccd2, metalness: 0.7, roughness: 0.35 });
+  const tail = new THREE.MeshStandardMaterial({ color: 0xff3838, emissive: 0xaa1010, emissiveIntensity: 0.9, roughness: 0.4 });
+  const lamp = new THREE.MeshStandardMaterial({ color: 0xfff3c0, emissive: 0xfff0b0, emissiveIntensity: 1.0, roughness: 0.3 });
+  const tireMat = new THREE.MeshStandardMaterial({ color: 0x111116, roughness: 0.9 });
+  const hubMat = new THREE.MeshStandardMaterial({ color: 0xb9bdc4, metalness: 0.8, roughness: 0.35 });
+  const mkm = (geo, mat) => new THREE.Mesh(geo, mat);
+  const isVan = kind === 'van';
+  const len = isVan ? 4.4 : 4.0, wid = isVan ? 1.9 : 1.8, cabZ = isVan ? -0.1 : 0.05;
+  const lower = mkm(new THREE.BoxGeometry(wid, 0.7, len), paint); lower.position.y = 0.62; g.add(lower);
+  const skirt = mkm(new THREE.BoxGeometry(wid - 0.04, 0.22, len - 0.1), dark); skirt.position.y = 0.42; g.add(skirt);
+  if (isVan) {
+    const cab = mkm(new THREE.BoxGeometry(wid - 0.06, 1.0, len * 0.72), paint); cab.position.set(0, 1.32, -0.2); g.add(cab);
+    const wind = mkm(new THREE.BoxGeometry(wid - 0.18, 0.55, 0.06), glass); wind.position.set(0, 1.35, len * 0.72 / 2 - 0.2 + 0.02); wind.rotation.x = 0.18; g.add(wind);
+    const sgL = mkm(new THREE.BoxGeometry(0.05, 0.42, 1.8), glass); sgL.position.set(-(wid / 2 - 0.03), 1.32, -0.1); g.add(sgL);
+    const sgR = mkm(new THREE.BoxGeometry(0.05, 0.42, 1.8), glass); sgR.position.set((wid / 2 - 0.03), 1.32, -0.1); g.add(sgR);
+  } else {
+    const cab = mkm(new THREE.BoxGeometry(wid - 0.1, 0.62, 1.9), paint); cab.position.set(0, 1.18, cabZ); g.add(cab);
+    const roof = mkm(new THREE.BoxGeometry(wid - 0.22, 0.06, 1.5), paint); roof.position.set(0, 1.5, cabZ); g.add(roof);
+    const wind = mkm(new THREE.BoxGeometry(wid - 0.18, 0.5, 0.06), glass); wind.position.set(0, 1.26, cabZ + 0.92); wind.rotation.x = 0.4; g.add(wind);
+    const rear = mkm(new THREE.BoxGeometry(wid - 0.18, 0.46, 0.06), glass); rear.position.set(0, 1.24, cabZ - 0.92); rear.rotation.x = -0.35; g.add(rear);
+    const sgL = mkm(new THREE.BoxGeometry(0.05, 0.34, 1.4), glass); sgL.position.set(-(wid / 2 - 0.02), 1.22, cabZ); g.add(sgL);
+    const sgR = mkm(new THREE.BoxGeometry(0.05, 0.34, 1.4), glass); sgR.position.set((wid / 2 - 0.02), 1.22, cabZ); g.add(sgR);
+    if (kind === 'taxi') { const sign = mkm(new THREE.BoxGeometry(0.5, 0.16, 0.22), new THREE.MeshStandardMaterial({ color: 0x111111, emissive: 0xffcc33, emissiveIntensity: 0.7 })); sign.position.set(0, 1.58, cabZ); g.add(sign); }
+  }
+  // headlights at +Z (nose), taillights at -Z (tail) — same convention as buildCarMesh
+  for (const sx of [-0.6, 0.6]) {
+    const hl = mkm(new THREE.BoxGeometry(0.3, 0.14, 0.08), lamp); hl.position.set(sx, 0.72, len / 2 - 0.02); g.add(hl);
+    const tl = mkm(new THREE.BoxGeometry(0.28, 0.16, 0.06), tail); tl.position.set(sx, 0.76, -(len / 2 - 0.02)); g.add(tl);
+  }
+  const grille = mkm(new THREE.BoxGeometry(0.7, 0.16, 0.05), chrome); grille.position.set(0, 0.6, len / 2 - 0.01); g.add(grille);
+  const bumF = mkm(new THREE.BoxGeometry(wid, 0.22, 0.26), dark); bumF.position.set(0, 0.44, len / 2 - 0.02); g.add(bumF);
+  const bumR = mkm(new THREE.BoxGeometry(wid, 0.22, 0.26), dark); bumR.position.set(0, 0.44, -(len / 2 - 0.02)); g.add(bumR);
+  // wheels: SAME scheme as buildCarMesh — FRONT (+Z) inside steerPivots[0,1], REAR (-Z) [2,3], axle along X
+  const wheelGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.3, 18); wheelGeo.rotateZ(PI / 2);
+  const hubGeo = new THREE.CylinderGeometry(0.22, 0.22, 0.06, 12); hubGeo.rotateZ(PI / 2);
+  const makeWheel = (side) => { const w = mkm(wheelGeo, tireMat); const hub = mkm(hubGeo, hubMat); hub.position.x = side * 0.14; w.add(hub); return w; };
+  const wheels = [], steerPivots = []; const wz = len / 2 - 0.85; let wi = 0;
+  for (const [x, z] of [[-(wid / 2 - 0.05), wz], [(wid / 2 - 0.05), wz], [-(wid / 2 - 0.05), -wz], [(wid / 2 - 0.05), -wz]]) {
+    const w = makeWheel(x < 0 ? -1 : 1);
+    if (wi < 2) { const pivot = new THREE.Group(); pivot.position.set(x, 0.42, z); pivot.add(w); g.add(pivot); steerPivots.push(pivot); }
+    else { w.position.set(x, 0.42, z); g.add(w); }
+    wheels.push(w); wi++;
+  }
+  g.traverse((m) => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
+  return { group: g, wheels, steerPivots };
+}
+// muted civilian palette (NOT the supercar rosso/giallo CAR_COLORS)
+const NPC_CAR_COLORS = [0x9aa3ad, 0x394150, 0x6b4a2a, 0xb7c0c8, 0x33403a, 0x7a2f2f, 0xc9c9cf, 0x2f3a5a];
+// the ambient-traffic array D's gta/traffic.js drives — SEPARATE from vehicles[]
+const traffic = [];
+function spawnTrafficCar(x, z, heading, opts) {
+  const o = opts || {};
+  const kind = o.kind || (Math.random() < 0.2 ? 'van' : Math.random() < 0.12 ? 'taxi' : 'sedan');
+  const color = (o.color != null) ? o.color : NPC_CAR_COLORS[(Math.random() * NPC_CAR_COLORS.length) | 0];
+  const { group, wheels, steerPivots } = buildNpcCarMesh({ kind, color });
+  group.position.set(x, 0, z); group.rotation.y = heading || 0;
+  if (scene) scene.add(group);
+  const rec = { mesh: group, wheels, steerPivots, pos: new THREE.Vector3(x, 0, z), heading: heading || 0, speed: 0, steer: 0, kind, color };
+  traffic.push(rec);
+  return rec;
 }
 
 // ============================================================
@@ -1985,6 +2118,16 @@ OF.internals = {
   bound: BOUND,
   resolveCollision, insideBuilding, spawnVehicle, nearestVehicle, enterVehicle, exitVehicle, killPed, startleNearby, justPressed,
 };
+
+// --- Lane A round-3 factories exposed for Lane D (added here, not in the literal
+// above, so it never conflicts with D extending its own internals object). See REQUESTS:
+// D owns pickup logic/respawn + traffic AI; A is a pure mesh/scene/record provider. ---
+OF.internals.buildPickupMesh = buildPickupMesh;
+OF.internals.spawnPickupMesh = spawnPickupMesh;
+OF.internals.aPickups = aPickups;
+OF.internals.buildNpcCarMesh = buildNpcCarMesh;
+OF.internals.spawnTrafficCar = spawnTrafficCar;
+OF.internals.traffic = traffic;
 
 ensureHud();
 watchForWin();
