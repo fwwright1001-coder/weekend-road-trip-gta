@@ -71,6 +71,18 @@ let _tmpA = null;                  // misc scratch
 let _muzzleWorld = null;           // muzzle world position
 let _meleeFwd = null;              // melee forward direction (flat XZ)
 let _crimePos = null;              // reusable crime/pos payload vector
+let _beamDir = null;               // tracer beam direction (normalized)
+let _beamUp = null;                // +Y reference for orienting the beam cylinder
+
+// Per-weapon tracer/flash styling: a warm glow + a near-white hot core, sized and
+// tinted per weapon so each gun reads differently down-range.
+const TRACER_STYLE = {
+  pistol:  { glow: 0xffe48a, core: 0xffffff, r: 0.020, life: 0.055 },
+  ak47:    { glow: 0xffae3c, core: 0xfff0c4, r: 0.026, life: 0.05 },
+  smg:     { glow: 0xffe48a, core: 0xffffff, r: 0.017, life: 0.04 },
+  shotgun: { glow: 0xffc94a, core: 0xfff0c0, r: 0.022, life: 0.06 },
+  fists:   null,
+};
 
 // ------------------------------------------------------------
 // Small aim-assist so center-mass clicks land reliably on low-poly bodies.
@@ -88,6 +100,7 @@ const combat = {
   ctx: null,
   owned: null,          // { weaponId: { clip, reserve } } for owned weapons
   current: 'fists',     // current weapon id
+  _shownWeapon: null,   // weapon id currently shown on the avatar (mesh swap sync)
   cooldown: 0,          // time remaining before next shot
   reloading: false,
   reloadT: 0,           // reload countdown
@@ -117,6 +130,8 @@ const combat = {
     _muzzleWorld = new THREE.Vector3();
     _meleeFwd = new THREE.Vector3();
     _crimePos = new THREE.Vector3();
+    _beamDir = new THREE.Vector3();
+    _beamUp = new THREE.Vector3(0, 1, 0);
 
     // ----- loadout: start with just fists (host hands out pistol later) -----
     if (!this.owned) {
@@ -125,6 +140,7 @@ const combat = {
       };
     }
     this.current = 'fists';
+    this._shownWeapon = null;   // force a weapon-mesh resync on the first update
     this.cooldown = 0;
     this.reloading = false;
     this.reloadT = 0;
@@ -160,32 +176,37 @@ const combat = {
     ctx.scene.add(grp);
     this._fxGroup = grp;
 
-    // tracer pool: thin emissive line segments that flash for a few ms
+    // tracer pool: each tracer is a stretched additive "beam" — a wide warm glow
+    // cylinder + a thin near-white hot core down its axis. Reads as a bright core
+    // with a fading tail from the muzzle to the impact point. (Line linewidth is
+    // unreliable across GPUs, so we use real geometry.)
+    const beamGeo = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true);   // unit cylinder, scaled per shot
     const factory = () => {
-      const geo = new THREE.BufferGeometry();
-      // 2 points (start,end); positions rewritten each shot
-      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-      const mat = new THREE.LineBasicMaterial({
-        color: 0xfff1a8, transparent: true, opacity: 0.9, depthWrite: false,
-      });
-      const line = new THREE.Line(geo, mat);
-      line.frustumCulled = false;
-      line.userData.life = 0;
-      line.visible = false;
-      return line;
+      const t = new THREE.Group();
+      const glowMat = new THREE.MeshBasicMaterial({ color: 0xffe48a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+      const coreMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+      const glow = new THREE.Mesh(beamGeo, glowMat);
+      const core = new THREE.Mesh(beamGeo, coreMat);
+      glow.frustumCulled = false; core.frustumCulled = false;
+      t.add(glow, core);
+      t.frustumCulled = false; t.visible = false;
+      t.userData = { life: 0, maxLife: TRACER_LIFE, glowMat, coreMat, glow, core };
+      return t;
     };
     this._tracerPool = GTA.makePool(factory, grp);
 
-    // muzzle flash: a small emissive sphere we pop at the muzzle for a frame or two
+    // muzzle flash: an additive emissive sphere we pop at the muzzle for a frame
+    // or two, tinted per weapon and scale-pulsed for a livelier pop.
     const flashMat = new THREE.MeshBasicMaterial({
-      color: 0xffd24a, transparent: true, opacity: 0.0, depthWrite: false,
+      color: 0xffd24a, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    const flash = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), flashMat);
+    const flash = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), flashMat);
     flash.frustumCulled = false;
     flash.visible = false;
     grp.add(flash);
     this._flash = flash;
     this._flashT = 0;
+    this._flashMax = FLASH_LIFE;
   },
 
   // ============================================================
@@ -200,6 +221,11 @@ const combat = {
     // tick timers regardless of alive state so FX clear out cleanly
     if (this.cooldown > 0) this.cooldown -= dt;
     this._decayFx(dt);
+
+    // keep the avatar's visible weapon mesh in sync with the equipped weapon —
+    // this is what makes the modeled gun (and the fists = no-gun state) show up,
+    // and updates userData.muzzle so tracers/flash leave the right barrel.
+    if (this._shownWeapon !== this.current) this._syncWeaponMesh();
 
     // reload progress
     if (this.reloading) {
@@ -271,6 +297,7 @@ const combat = {
     this.cooldown = 0;
     this.reloading = false;
     this.reloadT = 0;
+    this._shownWeapon = null;   // re-sync the in-hand weapon mesh after respawn/re-enter
     this._flashT = 0;
     if (this._flash) { this._flash.visible = false; this._flash.material.opacity = 0; }
     if (this._tracerPool) {
@@ -317,7 +344,11 @@ const combat = {
 
     const pellets = Math.max(1, w.pellets | 0);
     let anyHit = false;
-    let lastEnd = null;
+    const style = TRACER_STYLE[w.id] || TRACER_STYLE.pistol;
+
+    // tracers are DRAWN from the avatar's muzzle node (the ray is still cast from
+    // the camera so aim matches the crosshair), so bullets visibly leave the gun.
+    this._muzzleStart(ctx, _muzzleWorld);
 
     for (let p = 0; p < pellets; p++) {
       _rayDir.copy(_dir);
@@ -325,13 +356,12 @@ const combat = {
       const hit = this._castRay(ctx, _origin, _rayDir, w.rangeM, w.damage);
       // tracer endpoint: impact point if we hit, else max range along the ray
       _tmpA.copy(_origin).addScaledVector(_rayDir, hit.dist);
-      this._spawnTracer(_origin, _tmpA);
+      this._spawnTracer(_muzzleWorld, _tmpA, style);
       if (hit.hit) anyHit = true;
-      lastEnd = _tmpA;
     }
 
     // muzzle flash at the avatar's muzzle node
-    this._spawnFlash(ctx);
+    this._spawnFlash(ctx, style);
 
     // feedback + crime + recoil
     if (player) {
@@ -522,20 +552,39 @@ const combat = {
   // ============================================================
   // FX — tracers + muzzle flash (pooled, timer-decayed)
   // ============================================================
-  _spawnTracer(a, b) {
+  // resolve the world-space point a tracer should start from: the avatar's muzzle
+  // node (set per weapon by buildPerson's setWeapon), or a fallback just ahead of
+  // the camera if the rig has no muzzle.
+  _muzzleStart(ctx, out) {
+    const player = ctx.player;
+    const mz = player && player.mesh && player.mesh.userData ? player.mesh.userData.muzzle : null;
+    if (mz && mz.getWorldPosition) { mz.getWorldPosition(out); return out; }
+    if (ctx.camera) { out.copy(ctx.camera.position).addScaledVector(_dir, 0.5); return out; }
+    out.set(0, 1.3, 0); return out;
+  },
+
+  _spawnTracer(a, b, style) {
     if (!this._tracerPool) return;
     // makePool: we manually grab one item without the begin/end frame cycle so
     // tracers can live across frames; we recycle the oldest by scanning life.
-    const line = this._acquireTracer();
-    if (!line) return;
-    const pos = line.geometry.getAttribute('position');
-    pos.setXYZ(0, a.x, a.y, a.z);
-    pos.setXYZ(1, b.x, b.y, b.z);
-    pos.needsUpdate = true;
-    // line.frustumCulled === false, so no bounding sphere is needed (dead work per shot)
-    line.material.opacity = 0.9;
-    line.visible = true;
-    line.userData.life = TRACER_LIFE;
+    const t = this._acquireTracer();
+    if (!t) return;
+    const ud = t.userData;
+    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    const len = Math.hypot(dx, dy, dz) || 0.001;
+    // place the beam at the segment midpoint, oriented from a -> b (cylinder is +Y)
+    t.position.set((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+    _beamDir.set(dx / len, dy / len, dz / len);
+    t.quaternion.setFromUnitVectors(_beamUp, _beamDir);
+    const r = (style && style.r) || 0.02;
+    ud.glow.scale.set(r, len, r);
+    ud.core.scale.set(r * 0.38, len, r * 0.38);
+    ud.glowMat.color.setHex((style && style.glow) || 0xffe48a);
+    ud.coreMat.color.setHex((style && style.core) || 0xffffff);
+    ud.glowMat.opacity = 0.5; ud.coreMat.opacity = 0.95;
+    ud.maxLife = (style && style.life) || TRACER_LIFE;
+    ud.life = ud.maxLife;
+    t.visible = true;
   },
 
   // grab a free (expired) tracer from the pool, growing it if all are live
@@ -554,7 +603,7 @@ const combat = {
     return made || this._tracerPool.items[this._tracerPool.items.length - 1];
   },
 
-  _spawnFlash(ctx) {
+  _spawnFlash(ctx, style) {
     const flash = this._flash;
     if (!flash) return;
     const player = ctx.player;
@@ -571,32 +620,49 @@ const combat = {
         player.pos.z + Math.cos(f) * 0.6,
       );
     }
+    flash.material.color.setHex(style && style.core ? style.core : 0xffd24a);
+    // bigger pop for the heavier guns
+    this._flashSize = style === TRACER_STYLE.shotgun ? 1.5 : style === TRACER_STYLE.ak47 ? 1.3 : 1.0;
     flash.visible = true;
-    flash.material.opacity = 0.95;
+    flash.material.opacity = 0.98;
     this._flashT = FLASH_LIFE;
   },
 
+  // Show the modeled weapon that matches the equipped one. buildPerson hangs all
+  // five weapons on the avatar + a setWeapon(id) that toggles visibility and points
+  // userData.muzzle at the active barrel; we just drive it from the equipped id.
+  _syncWeaponMesh() {
+    const mesh = this.ctx && this.ctx.player && this.ctx.player.mesh;
+    const ud = mesh && mesh.userData;
+    if (ud && typeof ud.setWeapon === 'function') {
+      try { ud.setWeapon(this.current); } catch (e) { /* never brick a frame on cosmetics */ }
+    }
+    this._shownWeapon = this.current;   // record even on a no-op rig so we don't retry every frame
+  },
+
   _decayFx(dt) {
-    // tracers
+    // tracers — fade glow + core over each tracer's (per-weapon) life
     if (this._tracerPool) {
       const items = this._tracerPool.items;
       for (let i = 0; i < items.length; i++) {
-        const ln = items[i];
-        if (ln.userData.life > 0) {
-          ln.userData.life -= dt;
-          const k = Math.max(0, ln.userData.life / TRACER_LIFE);
-          ln.material.opacity = 0.9 * k;
-          if (ln.userData.life <= 0) { ln.visible = false; ln.material.opacity = 0; }
+        const t = items[i];
+        const ud = t.userData;
+        if (ud.life > 0) {
+          ud.life -= dt;
+          const k = Math.max(0, ud.life / (ud.maxLife || TRACER_LIFE));
+          ud.glowMat.opacity = 0.5 * k;
+          ud.coreMat.opacity = 0.95 * k;
+          if (ud.life <= 0) { t.visible = false; ud.glowMat.opacity = 0; ud.coreMat.opacity = 0; }
         }
       }
     }
     // muzzle flash
     if (this._flash && this._flashT > 0) {
       this._flashT -= dt;
-      const k = Math.max(0, this._flashT / FLASH_LIFE);
-      this._flash.material.opacity = 0.95 * k;
-      // pulse the scale a touch for a livelier pop
-      const s = 0.8 + k * 0.7;
+      const k = Math.max(0, this._flashT / (this._flashMax || FLASH_LIFE));
+      this._flash.material.opacity = 0.98 * k;
+      // pulse the scale a touch for a livelier pop (sized per weapon)
+      const s = (this._flashSize || 1) * (0.7 + k * 0.8);
       this._flash.scale.set(s, s, s);
       if (this._flashT <= 0) { this._flash.visible = false; this._flash.material.opacity = 0; }
     }
