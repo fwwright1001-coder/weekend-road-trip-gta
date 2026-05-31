@@ -1117,7 +1117,10 @@ function spawnPed(rng, atRandomSpot) {
   scene.add(mesh);
   const ped = {
     mesh, mats, pos: new THREE.Vector3(px, 0, pz), vel: new THREE.Vector3(),
-    target: new THREE.Vector3(px, 0, pz), state: 'wander', t: 0, dead: false, fall: 0, walkPhase: r() * 10,
+    target: new THREE.Vector3(px, 0, pz), threat: new THREE.Vector3(px, 0, pz),
+    state: 'wander', t: 0, dead: false, fall: 0, walkPhase: r() * 10,
+    // round-3 behaviour: varied gait, occasional loitering, panic direction
+    speedMul: 0.7 + r() * 0.6, loiterT: 2 + r() * 6, scatterDir: r() * Math.PI * 2,
   };
   pickTarget(ped, r);
   peds.push(ped);
@@ -1822,23 +1825,79 @@ function updatePed(p, dt) {
     return;
   }
 
-  // panic if the player recently fired nearby — flee
-  if (p.state === 'flee') { p.t -= dt; if (p.t <= 0) p.state = 'wander'; }
+  // threat sense: a fast car bearing down makes a ped dive/freeze (player car or traffic)
+  if (p.state !== 'cower') {
+    const veh = nearestThreatVehicle(p.pos);
+    if (veh) panicPed(p, veh.pos.x, veh.pos.z, 'cower');
+  }
 
-  let dx, dz;
+  // panic / loiter timers
+  if (p.state === 'flee' || p.state === 'scatter' || p.state === 'cower') {
+    p.t -= dt; if (p.t <= 0) p.state = 'wander';
+  } else if (p.state === 'loiter') {
+    p.loiterT -= dt; if (p.loiterT <= 0) { p.state = 'wander'; pickTarget(p); }
+  } else if (Math.random() < 0.0015) {                 // wander → occasionally stop to loiter
+    p.state = 'loiter'; p.loiterT = 1.5 + Math.random() * 4;
+  }
+
+  // choose move direction + speed by state
+  let dx = 0, dz = 0, sp = 0, moving = true, crouch = false;
   if (p.state === 'flee') {
-    dx = p.pos.x - player.pos.x; dz = p.pos.z - player.pos.z;     // away from player
-  } else {
+    dx = p.pos.x - p.threat.x; dz = p.pos.z - p.threat.z;          // straight away from the threat
+    sp = PED_FLEE * p.speedMul;
+  } else if (p.state === 'scatter') {
+    dx = Math.sin(p.scatterDir); dz = Math.cos(p.scatterDir);      // a fixed panic heading
+    sp = PED_FLEE * p.speedMul;
+  } else if (p.state === 'cower') {
+    moving = false; crouch = true;                                 // freeze + duck, facing away
+    dx = p.pos.x - p.threat.x; dz = p.pos.z - p.threat.z;
+  } else if (p.state === 'loiter') {
+    moving = false;
+    dx = Math.sin(p.walkPhase); dz = Math.cos(p.walkPhase);        // idle facing
+  } else {                                                          // wander
     dx = p.target.x - p.pos.x; dz = p.target.z - p.pos.z;
     if (Math.hypot(dx, dz) < 1.2) { pickTarget(p); dx = p.target.x - p.pos.x; dz = p.target.z - p.pos.z; }
+    sp = PED_WALK * p.speedMul;
   }
   const l = Math.hypot(dx, dz) || 1;
-  const sp = p.state === 'flee' ? PED_FLEE : PED_WALK;
-  p.pos.x += (dx / l) * sp * dt; p.pos.z += (dz / l) * sp * dt;
-  resolveCollision(p.pos, PED_R);
+  if (moving && sp > 0) {
+    p.pos.x += (dx / l) * sp * dt; p.pos.z += (dz / l) * sp * dt;
+    resolveCollision(p.pos, PED_R);
+  }
   p.mesh.position.copy(p.pos);
   p.mesh.rotation.y = Math.atan2(dx, dz);
-  animateWalk(p.mesh, true, dt, sp);
+  p.mesh.scale.y = crouch ? 0.7 : 1;                               // duck while cowering
+  animateWalk(p.mesh, moving, dt, sp || PED_WALK);
+}
+
+// nearest moving vehicle that's an imminent run-over threat to a position
+function nearestThreatVehicle(pos) {
+  let best = null, bd = 6;
+  for (const v of vehicles) {
+    if (!v.pos || Math.abs(v.speed || 0) < RUN_OVER_SPEED) continue;   // only moving cars scare peds
+    const d = Math.hypot(v.pos.x - pos.x, v.pos.z - pos.z);
+    if (d < bd) { bd = d; best = v; }
+  }
+  return best;
+}
+
+// set ONE ped panicking away from a threat point. mode: 'flee' | 'scatter' | 'cower'
+// ('cower' only triggers when the threat is right on top of them, else they run).
+function panicPed(p, tx, tz, mode) {
+  if (!p || p.dead || p.state === 'dead') return;
+  p.threat.set(tx, 0, tz);
+  const d = Math.hypot(p.pos.x - tx, p.pos.z - tz);
+  if (mode === 'cower' && d < 3.5) { p.state = 'cower'; p.t = 1.2 + Math.random() * 1.2; }
+  else if (mode === 'scatter') { p.state = 'scatter'; p.scatterDir = Math.atan2(p.pos.x - tx, p.pos.z - tz) + (Math.random() - 0.5) * 1.2; p.t = 2 + Math.random() * 2; }
+  else { p.state = 'flee'; p.t = 2.5 + Math.random() * 2.5; }
+}
+
+// panic every ped within `radius` of a point (gunfire / explosion / siren / etc.)
+function panicArea(tx, tz, radius, mode) {
+  for (const p of peds) {
+    if (p.dead) continue;
+    if (Math.hypot(p.pos.x - tx, p.pos.z - tz) <= radius) panicPed(p, tx, tz, mode || 'flee');
+  }
 }
 
 function respawnPed(p) {
@@ -1852,12 +1911,9 @@ function respawnPed(p) {
   p.dead = false; p.state = 'wander'; p.t = 0; pickTarget(p);
 }
 
-// make nearby peds flee when the player shoots
+// make nearby peds flee when the player shoots (gunfire originates at the player)
 function startleNearby() {
-  for (const p of peds) {
-    if (p.dead) continue;
-    if (p.pos.distanceTo(player.pos) < 22) { p.state = 'flee'; p.t = 3 + Math.random() * 2; }
-  }
+  panicArea(player.pos.x, player.pos.z, 22, 'flee');
 }
 
 // walk animation: drive the rigged model's AnimationMixer when present, else the
@@ -1984,6 +2040,8 @@ OF.internals = {
   get playerVehicle() { return playerVehicle; },
   bound: BOUND,
   resolveCollision, insideBuilding, spawnVehicle, nearestVehicle, enterVehicle, exitVehicle, killPed, startleNearby, justPressed,
+  // panic a radius of peds from a point (bridge calls this on explosions); mode: 'flee'|'scatter'|'cower'
+  panicPeds: (x, z, r, mode) => panicArea(x, z, r, mode || 'scatter'),
 };
 
 ensureHud();
