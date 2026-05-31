@@ -41,7 +41,11 @@ Inside `gta/`, every system shares the same `{name, init, update, reset, api}` s
 
 - `core.js` — the spine: `GTA` namespace, event bus, system registry, math utils.
 - `onfoot-bridge.js` — integration host: builds the shared `ctx` from `ONFOOT.internals`, registers systems, owns combat input + screen feedback + pickups, and is the single entry that imports everything below.
-- `combat.js` (weapons/firing/ammo) · `wanted.js` (stars) · `police.js` (cop AI) · `economy.js` (money + pickups) · `physics.js` (dynamic car-vs-building impact) · `hud-radar.js` (HUD + minimap) · `onfoot-heist.js` + `onfoot-bank.js` (the bank-heist mission) · `onfoot-detail.js` / `onfoot-textures.js` / `onfoot-actors.js` (props, textures, rigged NPCs) · `onfoot-render.js` (browser-only realism post-FX) · `fx.js` (optional particle/screen FX).
+- `combat.js` (weapons/firing/ammo) · `wanted.js` (stars + escalation) · `police.js` (cop AI: cover / backup waves / flanking / rival-gang faction) · `traffic.js` (ambient NPC traffic AI) · `pickups.js` (health/armor respawn) · `economy.js` (money + pickups) · `physics.js` (dynamic car-vs-building impact) · `hud-radar.js` (HUD + minimap) · `onfoot-heist.js` + `onfoot-bank.js` (the bank-heist mission) · `onfoot-detail.js` / `onfoot-textures.js` / `onfoot-actors.js` (props, textures, rigged NPCs) · `onfoot-render.js` (browser-only realism post-FX) · `fx.js` (particle/screen FX) · `audio.js` (radio/music + soundscape).
+
+**Living world (round 3):** cops seek cover behind buildings, call **backup waves** that escalate with your stars, flank to surround you, and trade fire with a **rival gang** that shows up at 3+ stars. Ambient **traffic** drives the streets (jack any car). Pedestrians **flee, scatter, or cower** from gunfire, explosions, and speeding cars. Health/armor pickups **respawn** on a timer. Press `[` / `]` to change the radio station.
+
+**Event bus additions (round 3):** `police:backup`, `faction:spawn` / `faction:fight`, `traffic:spawned` / `traffic:despawned`, `pickup:respawn`, `audio:station` / `audio:mute`. See the catalog comment in `gta/core.js`.
 
 **First-person mode:** `V` toggles `window.ONFOOT.firstPerson`. The host owns the state + body-mesh visibility + the V key; the camera/viewmodel live in the render/fx layer. The aim ray is camera-based, so shooting stays correct in either view.
 
