@@ -82,7 +82,7 @@ let _tmpVec = null;           // lazy scratch Vector3 for muzzle world position
 const LIGHT_CAP = 6;
 let _lights = null;           // { items:[{light,life,maxLife,base}], head }
 // menu-controllable shake (settings: toggle + intensity)
-let _shakeScale = 1, _shakeEnabled = true;
+let _shakeScale = 1, _shakeEnabled = false;   // screen shake fully removed per Forrest's request (2026-05)
 
 // footstep pacing
 let _lastFoot = null;         // {x,z} player pos at last footstep sample
@@ -679,14 +679,10 @@ function flash(opts) {
 // re-derives camera.position from its smoothed value next frame, so this never
 // accumulates / drifts.
 function applyShake(dt) {
-  if (!_camera || !_camera.position) return;
-  _trauma = Math.max(0, _trauma - SHAKE_DECAY * dt);
-  if (_trauma <= 0.0001) return;
-  const s = _trauma * _trauma;                       // perceptual curve
-  _camera.position.x += (Math.random() * 2 - 1) * SHAKE_POS * s;
-  _camera.position.y += (Math.random() * 2 - 1) * SHAKE_POS * s;
-  _camera.position.z += (Math.random() * 2 - 1) * SHAKE_POS * s;
-  if (_camera.rotation) _camera.rotation.z += (Math.random() * 2 - 1) * SHAKE_ROLL * s;   // transient roll (lookAt resets it next frame)
+  // Screen shake fully removed per Forrest's request (2026-05): no camera offset, ever.
+  // Kept as a no-op (rather than deleted) so callers/settings wiring stay intact.
+  _trauma = 0;
+  return;
 }
 
 // ============================================================
