@@ -430,6 +430,50 @@ function _drawFacadeB(size) {
   return cv;
 }
 
+// PRECAST — modern precast-concrete panels: a grid of large pale slabs with deep
+// reveal joints, one small punched window per panel, and aggregate speckle. A
+// fourth distinct facade so the skyline of the new cornice/ledge buildings reads
+// varied (stucco vs glass curtain-wall vs precast vs brick).
+function _drawPrecast(size) {
+  const made = _makeCanvas(size);
+  if (!made) return null;
+  const { cv, ctx } = made;
+  const rand = _rng(0x9EC0A57);
+  // pale concrete base
+  const base = ctx.createLinearGradient(0, 0, 0, size);
+  base.addColorStop(0, '#aeaaa0');
+  base.addColorStop(1, '#9a968c');
+  ctx.fillStyle = base; ctx.fillRect(0, 0, size, size);
+  _blotches(ctx, size, 8, rand, 0.05);
+  _speckle(ctx, size, Math.floor(size * size * 0.004), rand, { minA: 0.02, maxA: 0.08, rMin: 0.5, rMax: 1.4 });
+  _speckle(ctx, size, Math.floor(size * size * 0.0012), rand, { minA: 0.05, maxA: 0.13, rMin: 0.7, rMax: 1.7, tint: [120, 112, 100] });
+  const cols = 3, rows = 3, pw = size / cols, ph = size / rows;
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const x = c * pw, y = r * ph;
+    // subtle per-panel tone jitter
+    const v = (rand() - 0.5) * 14;
+    ctx.fillStyle = `rgba(${172 + v},${168 + v},${158 + v},0.10)`;
+    ctx.fillRect(x + 3, y + 3, pw - 6, ph - 6);
+    // a punched window in the upper-middle of each panel
+    const ww = pw * 0.42, wh = ph * 0.34, wx = x + (pw - ww) / 2, wy = y + ph * 0.22;
+    ctx.fillStyle = '#4f5a62';
+    ctx.fillRect(wx - 2, wy - 2, ww + 4, wh + 4);                 // reveal frame
+    const lit = rand() < 0.16;
+    const gl = ctx.createLinearGradient(wx, wy, wx, wy + wh);
+    if (lit) { gl.addColorStop(0, '#ffe6a4'); gl.addColorStop(1, '#caa86e'); }
+    else { gl.addColorStop(0, '#8fb0c4'); gl.addColorStop(1, '#5a7888'); }
+    ctx.fillStyle = gl; ctx.fillRect(wx, wy, ww, wh);
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(wx, wy + wh * 0.5); ctx.lineTo(wx + ww, wy + wh * 0.5); ctx.stroke();
+  }
+  // deep reveal joints between panels
+  ctx.strokeStyle = 'rgba(48,46,42,0.6)';
+  ctx.lineWidth = Math.max(2, size * 0.012);
+  for (let c = 0; c <= cols; c++) { ctx.beginPath(); ctx.moveTo(c * pw, 0); ctx.lineTo(c * pw, size); ctx.stroke(); }
+  for (let r = 0; r <= rows; r++) { ctx.beginPath(); ctx.moveTo(0, r * ph); ctx.lineTo(size, r * ph); ctx.stroke(); }
+  return cv;
+}
+
 // ============================================================
 // PUBLIC: makeTextures(THREE) — build once, cache, return the set.
 // ============================================================
@@ -440,7 +484,7 @@ export function makeTextures(THREE) {
   if (_texTried && _texCache) return _texCache;
   _texTried = true;
 
-  const out = { asphalt: null, grass: null, concrete: null, facade: null, facadeB: null, brick: null, sidewalk: null };
+  const out = { asphalt: null, grass: null, concrete: null, facade: null, facadeB: null, precast: null, brick: null, sidewalk: null };
   if (!THREE || typeof THREE.CanvasTexture !== 'function') {
     _texCache = out;
     return out;
@@ -451,6 +495,7 @@ export function makeTextures(THREE) {
     out.concrete = _toTexture(THREE, _drawConcrete(256));
     out.facade = _toTexture(THREE, _drawFacade(512));
     out.facadeB = _toTexture(THREE, _drawFacadeB(512));
+    out.precast = _toTexture(THREE, _drawPrecast(512));
     out.brick = _toTexture(THREE, _drawBrick(512));
     out.sidewalk = _toTexture(THREE, _drawSidewalk(512));
   } catch (e) {
@@ -622,7 +667,7 @@ export function beautifyScene(THREE, scene, opts = {}) {
             // three building looks (punched-window stucco, glass curtain wall, brick)
             // chosen by a STABLE hash of the footprint+height so each building keeps
             // its look across calls (no flicker) but the skyline reads as varied.
-            const variants = [tex.facade, tex.facadeB, tex.brick].filter(Boolean);
+            const variants = [tex.facade, tex.facadeB, tex.precast, tex.brick].filter(Boolean);
             const pool = variants.length ? variants : [tex.facade || tex.brick];
             const hash = Math.round(box.w * 7 + box.d * 13 + box.h * 3);
             const baseTex = pool[((hash % pool.length) + pool.length) % pool.length];
