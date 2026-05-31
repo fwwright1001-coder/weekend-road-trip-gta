@@ -49,11 +49,11 @@ function makeRng(seed) {
 // Returns the Group it added (so the caller can keep a handle).
 // ------------------------------------------------------------
 export function buildWorldDetail(THREE, scene, opts = {}) {
-  const BOUND = opts.bound != null ? opts.bound : 58;        // half-size of the town square
+  const BOUND = opts.bound != null ? opts.bound : 84;        // half-size of the town square (matches onfoot3d 7x7)
   const BLOCK = opts.block != null ? opts.block : 24;        // CELL grid spacing
   const ROAD_OFFSET = opts.roadOffset != null ? opts.roadOffset : 12; // streets at k*BLOCK+OFFSET
   const PLAZA_R = opts.plazaRadius != null ? opts.plazaRadius : 10;   // keep the spawn plaza clear
-  const MAX_PROPS = opts.maxProps != null ? opts.maxProps : 96;       // perf cap on solid props (target band ~60-120)
+  const MAX_PROPS = opts.maxProps != null ? opts.maxProps : 300;      // perf cap on solid props (instanced afterwards)
 
   const rng = makeRng(opts.seed != null ? opts.seed : 0x57DE7A11);
   const rand = (a, b) => a + rng() * (b - a);
@@ -82,11 +82,22 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
   // the nearest street. This keeps furniture off the buildings without the aabbs.
   const CORE_HALF = 8.5;            // keep-clear half-extent around a block centre
   const SIDEWALK = 9.6;            // ring radius from a block centre where props sit
-  const blocks = [];               // occupied building cells (cx,cz)
-  for (let gx = -2; gx <= 2; gx++) {
-    for (let gz = -2; gz <= 2; gz++) {
+  // Grid extent derived from BOUND so the dressing always covers the whole town
+  // (BOUND 58 -> 5x5, BOUND 84 -> 7x7). Zones mirror onfoot3d's zoneFor() so the
+  // furniture suits its surroundings (industrial gets dumpsters/fences, downtown
+  // gets benches/signage/bus-stops, residential gets trees/fences/mailboxes).
+  const GRID = Math.max(1, Math.round((BOUND - BLOCK / 2) / BLOCK));
+  const zoneOf = (gx, gz) => {
+    const ring = Math.max(Math.abs(gx), Math.abs(gz));
+    if (ring <= 1) return 'downtown';
+    if (ring === 2) return 'midtown';
+    return gx < 0 ? 'industrial' : 'residential';
+  };
+  const blocks = [];               // building cells (cx,cz,zone)
+  for (let gx = -GRID; gx <= GRID; gx++) {
+    for (let gz = -GRID; gz <= GRID; gz++) {
       if (gx === 0 && gz === 0) continue;        // spawn plaza stays open
-      blocks.push({ cx: gx * BLOCK, cz: gz * BLOCK });
+      blocks.push({ cx: gx * BLOCK, cz: gz * BLOCK, gx, gz, zone: zoneOf(gx, gz) });
     }
   }
 
@@ -138,6 +149,30 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
   M.flower    = new THREE.MeshStandardMaterial({ color: 0xd8607a, roughness: 0.85, flatShading: true });
   M.paintWhite= new THREE.MeshBasicMaterial({ color: 0xeef0f0 });   // crosswalk / stop bars
   M.paintYellow= new THREE.MeshBasicMaterial({ color: 0xffea88 });  // centre-line dashes
+  // --- extras for the new prop types (dumpsters, parked cars, signage, fences…) ---
+  M.dumpster  = new THREE.MeshStandardMaterial({ color: 0x2f5e44, roughness: 0.7, metalness: 0.25 });
+  M.dumpsterLid=new THREE.MeshStandardMaterial({ color: 0x274c39, roughness: 0.7, metalness: 0.2 });
+  M.rust      = new THREE.MeshStandardMaterial({ color: 0x6e4a32, roughness: 0.95 });
+  M.signGreen = new THREE.MeshStandardMaterial({ color: 0x1f6b43, roughness: 0.6, metalness: 0.15 });
+  M.signBlue  = new THREE.MeshStandardMaterial({ color: 0x2b4f86, roughness: 0.6, metalness: 0.15 });
+  M.signYellow= new THREE.MeshStandardMaterial({ color: 0xe7c64a, roughness: 0.6, metalness: 0.1 });
+  M.signRed   = new THREE.MeshStandardMaterial({ color: 0xb83a32, roughness: 0.55, metalness: 0.1 });
+  M.signFace  = new THREE.MeshStandardMaterial({ color: 0xe9ecee, roughness: 0.55 });        // shop board face
+  M.galv      = new THREE.MeshStandardMaterial({ color: 0x9a9ea6, roughness: 0.5, metalness: 0.6 }); // galvanised steel
+  M.chainlink = new THREE.MeshStandardMaterial({ color: 0x8b9097, roughness: 0.5, metalness: 0.55, transparent: true, opacity: 0.32, depthWrite: false, side: THREE.DoubleSide });
+  M.cone      = new THREE.MeshStandardMaterial({ color: 0xe5601f, roughness: 0.7 });
+  M.coneBand  = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.6 });
+  M.carBodyA  = new THREE.MeshStandardMaterial({ color: 0x4a5560, roughness: 0.45, metalness: 0.35 });
+  M.carBodyB  = new THREE.MeshStandardMaterial({ color: 0x7d4b3a, roughness: 0.45, metalness: 0.35 });
+  M.carBodyC  = new THREE.MeshStandardMaterial({ color: 0x6a6f5a, roughness: 0.45, metalness: 0.35 });
+  M.carGlass  = new THREE.MeshStandardMaterial({ color: 0x202a30, roughness: 0.2, metalness: 0.4 });
+  M.tire      = new THREE.MeshStandardMaterial({ color: 0x16161a, roughness: 0.9 });
+  M.mailbox   = new THREE.MeshStandardMaterial({ color: 0x355a8c, roughness: 0.55, metalness: 0.2 });
+  M.barrel    = new THREE.MeshStandardMaterial({ color: 0x9c3a2c, roughness: 0.7, metalness: 0.2 });
+  M.fire      = new THREE.MeshStandardMaterial({ color: 0xffb36a, emissive: 0xff7a1e, emissiveIntensity: 0.9, roughness: 0.6 });
+  M.shelter   = new THREE.MeshStandardMaterial({ color: 0x3a3f47, roughness: 0.5, metalness: 0.5 });
+  M.shelterGlass=new THREE.MeshStandardMaterial({ color: 0x9fb4c4, roughness: 0.12, metalness: 0.1, transparent: true, opacity: 0.34, depthWrite: false, side: THREE.DoubleSide });
+  M.hvac      = new THREE.MeshStandardMaterial({ color: 0x8d9197, roughness: 0.6, metalness: 0.4 });
 
   // --- geometries (unit-ish; positioned/scaled per prop) ---
   G.trunk    = new THREE.CylinderGeometry(0.18, 0.28, 1, 7);          // scaled in Y per tree
@@ -166,6 +201,38 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
   G.stripe   = new THREE.PlaneGeometry(0.6, 2.6);                     // crosswalk plank
   G.dash     = new THREE.PlaneGeometry(0.3, 2.2);                     // lane dash
   G.flowerHead = new THREE.SphereGeometry(0.09, 6, 5);
+  // --- extras: shared geometries for the new prop types ---
+  G.dumpBody = new THREE.BoxGeometry(1.7, 0.95, 1.0);
+  G.dumpLid  = new THREE.BoxGeometry(1.74, 0.1, 1.05);
+  G.dumpLeg  = new THREE.BoxGeometry(0.1, 0.22, 0.1);
+  G.signPost = new THREE.CylinderGeometry(0.05, 0.05, 1, 8);       // scaled in Y
+  G.signPlate= new THREE.BoxGeometry(1.2, 0.34, 0.05);            // street name blade
+  G.signShield=new THREE.BoxGeometry(0.5, 0.5, 0.05);            // square warning/info sign
+  G.shopBoard= new THREE.BoxGeometry(2.2, 0.7, 0.12);            // shop sign board
+  G.fencePost= new THREE.CylinderGeometry(0.045, 0.045, 1.5, 6);
+  G.fenceMesh= new THREE.PlaneGeometry(3.0, 1.35);               // chain-link panel (double-sided)
+  G.fenceRail= new THREE.BoxGeometry(3.0, 0.05, 0.05);
+  G.coneBody = new THREE.ConeGeometry(0.22, 0.55, 10);
+  G.coneBase = new THREE.BoxGeometry(0.5, 0.05, 0.5);
+  G.coneRing = new THREE.CylinderGeometry(0.16, 0.18, 0.08, 10);
+  G.carBody  = new THREE.BoxGeometry(1.9, 0.62, 4.1);
+  G.carCabin = new THREE.BoxGeometry(1.66, 0.56, 2.0);
+  G.carGlass = new THREE.BoxGeometry(1.5, 0.46, 1.7);
+  G.carWheel = new THREE.CylinderGeometry(0.36, 0.36, 0.26, 12);
+  G.bollard  = new THREE.CylinderGeometry(0.11, 0.13, 0.9, 10);
+  G.bollardCap=new THREE.SphereGeometry(0.12, 10, 8);
+  G.mailBody = new THREE.BoxGeometry(0.5, 0.6, 0.42);
+  G.mailTop  = new THREE.CylinderGeometry(0.21, 0.21, 0.5, 12, 1, false, 0, Math.PI);
+  G.mailLeg  = new THREE.BoxGeometry(0.07, 0.5, 0.07);
+  G.barrel   = new THREE.CylinderGeometry(0.3, 0.3, 0.86, 14);
+  G.barrelRim= new THREE.CylinderGeometry(0.31, 0.31, 0.05, 14);
+  G.fireGlow = new THREE.IcosahedronGeometry(0.26, 0);
+  G.shelterPost=new THREE.BoxGeometry(0.08, 2.3, 0.08);
+  G.shelterRoof=new THREE.BoxGeometry(3.4, 0.1, 1.4);
+  G.shelterPane=new THREE.PlaneGeometry(3.2, 1.6);
+  G.shelterBench=new THREE.BoxGeometry(2.6, 0.08, 0.4);
+  G.hvac     = new THREE.BoxGeometry(1.2, 0.7, 1.0);             // rooftop/alley AC unit
+  G.hvacFan  = new THREE.CylinderGeometry(0.32, 0.32, 0.06, 12);
 
   // root group everything hangs off of
   const root = new THREE.Group();
@@ -320,6 +387,124 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
     return g;
   }
 
+  // Steel dumpster: slab body, slanted lid, four stubby legs, a rust patch. ~6 meshes.
+  function makeDumpster() {
+    const g = new THREE.Group();
+    const body = solid(new THREE.Mesh(G.dumpBody, M.dumpster)); body.position.y = 0.6; g.add(body);
+    const lid = solid(new THREE.Mesh(G.dumpLid, M.dumpsterLid)); lid.position.set(0, 1.08, 0); lid.rotation.x = chance(0.5) ? -0.12 : 0; g.add(lid);
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      const leg = solid(new THREE.Mesh(G.dumpLeg, M.metalDark));
+      leg.position.set(sx * 0.78, 0.11, sz * 0.42); g.add(leg);
+    }
+    if (chance(0.6)) { const rust = solid(new THREE.Mesh(G.dumpLid, M.rust)); rust.scale.set(0.4, 3.2, 0.5); rust.position.set(rand(-0.5, 0.5), 0.55, 0.51); g.add(rust); }
+    return g;
+  }
+
+  // Parked car: rounded-ish body, cabin, dark glass band, four tyres. ~7 meshes.
+  function makeParkedCar() {
+    const g = new THREE.Group();
+    const paint = pick([M.carBodyA, M.carBodyB, M.carBodyC]);
+    const body = solid(new THREE.Mesh(G.carBody, paint)); body.position.y = 0.62; g.add(body);
+    const cabin = solid(new THREE.Mesh(G.carCabin, paint)); cabin.position.set(0, 1.06, 0.05); g.add(cabin);
+    const glass = new THREE.Mesh(G.carGlass, M.carGlass); glass.position.set(0, 1.08, 0.05); g.add(glass);
+    for (const sx of [-1, 1]) for (const sz of [-1.35, 1.35]) {
+      const wheel = solid(new THREE.Mesh(G.carWheel, M.tire));
+      wheel.rotation.z = Math.PI / 2; wheel.position.set(sx * 0.92, 0.36, sz); g.add(wheel);
+    }
+    return g;
+  }
+
+  // Street-name sign on a pole, sometimes with a square warning/parking shield. ~3-4 meshes.
+  function makeStreetSign() {
+    const g = new THREE.Group();
+    const h = rand(2.2, 2.7);
+    const post = solid(new THREE.Mesh(G.signPost, M.metalMid)); post.scale.y = h; post.position.y = h / 2; g.add(post);
+    const blade = solid(new THREE.Mesh(G.signPlate, pick([M.signGreen, M.signBlue])));
+    blade.position.set(0.35, h - 0.1, 0); g.add(blade);
+    if (chance(0.5)) {
+      const shield = solid(new THREE.Mesh(G.signShield, pick([M.signYellow, M.signRed, M.signBlue])));
+      shield.position.set(0, h - 0.85, 0.02);
+      if (chance(0.5)) shield.rotation.z = Math.PI / 4;   // diamond warning
+      g.add(shield);
+    }
+    return g;
+  }
+
+  // Free-standing shop sign: short post + a coloured board with a pale face. ~3 meshes.
+  function makeShopSign() {
+    const g = new THREE.Group();
+    const h = rand(2.4, 3.1);
+    const post = solid(new THREE.Mesh(G.signPost, M.metalDark)); post.scale.y = h; post.position.y = h / 2; g.add(post);
+    const board = solid(new THREE.Mesh(G.shopBoard, pick([M.signRed, M.signBlue, M.signGreen, M.signYellow])));
+    board.position.set(0, h - 0.1, 0); g.add(board);
+    const face = solid(new THREE.Mesh(G.signPlate, M.signFace)); face.scale.set(1.5, 1.2, 1); face.position.set(0, h - 0.1, 0.04); g.add(face);
+    return g;
+  }
+
+  // Chain-link fence segment (~3u long, local X): posts + top rail + a translucent
+  // mesh panel (no shadow — it'd read as a solid slab). ~4-5 meshes.
+  function makeFence() {
+    const g = new THREE.Group();
+    for (const x of [-1.5, 0, 1.5]) { const p = solid(new THREE.Mesh(G.fencePost, M.galv)); p.position.set(x, 0.75, 0); g.add(p); }
+    const rail = solid(new THREE.Mesh(G.fenceRail, M.galv)); rail.position.set(0, 1.42, 0); g.add(rail);
+    const mesh = new THREE.Mesh(G.fenceMesh, M.chainlink); mesh.position.set(0, 0.72, 0); g.add(mesh);
+    return g;
+  }
+
+  // Short concrete/steel bollard. 2 meshes.
+  function makeBollard() {
+    const g = new THREE.Group();
+    const body = solid(new THREE.Mesh(G.bollard, M.metalMid)); body.position.y = 0.45; g.add(body);
+    const cap = solid(new THREE.Mesh(G.bollardCap, M.metalMid)); cap.position.y = 0.9; g.add(cap);
+    return g;
+  }
+
+  // Blue residential mailbox on a post. ~4 meshes.
+  function makeMailbox() {
+    const g = new THREE.Group();
+    const leg = solid(new THREE.Mesh(G.mailLeg, M.metalDark)); leg.position.y = 0.5; g.add(leg);
+    const body = solid(new THREE.Mesh(G.mailBody, M.mailbox)); body.position.y = 0.92; g.add(body);
+    const top = solid(new THREE.Mesh(G.mailTop, M.mailbox)); top.rotation.z = Math.PI / 2; top.position.set(0, 1.12, 0); top.scale.set(1, 1.15, 1); g.add(top);
+    return g;
+  }
+
+  // Industrial barrel; sometimes a lit fire on top (warm glow). ~3-4 meshes.
+  function makeBarrel(fiery) {
+    const g = new THREE.Group();
+    const body = solid(new THREE.Mesh(G.barrel, chance(0.5) ? M.barrel : M.metalMid)); body.position.y = 0.43; g.add(body);
+    const rimT = solid(new THREE.Mesh(G.barrelRim, M.metalDark)); rimT.position.y = 0.84; g.add(rimT);
+    const rimM = solid(new THREE.Mesh(G.barrelRim, M.metalDark)); rimM.position.y = 0.43; g.add(rimM);
+    if (fiery) { const fire = new THREE.Mesh(G.fireGlow, M.fire); fire.position.y = 0.96; fire.scale.set(1, 1.3, 1); g.add(fire); }
+    return g;
+  }
+
+  // Bus-stop shelter: two posts, a flat roof, a glass back pane, a bench. ~5 meshes.
+  function makeBusStop() {
+    const g = new THREE.Group();
+    for (const x of [-1.6, 1.6]) { const p = solid(new THREE.Mesh(G.shelterPost, M.shelter)); p.position.set(x, 1.15, -0.6); g.add(p); }
+    const roof = solid(new THREE.Mesh(G.shelterRoof, M.shelter)); roof.position.set(0, 2.3, -0.1); g.add(roof);
+    const back = new THREE.Mesh(G.shelterPane, M.shelterGlass); back.position.set(0, 1.2, -0.66); g.add(back);
+    const bench = solid(new THREE.Mesh(G.shelterBench, M.wood)); bench.position.set(0, 0.5, -0.45); g.add(bench);
+    return g;
+  }
+
+  // Traffic cone: square base + cone + reflective ring. 3 meshes.
+  function makeTrafficCone() {
+    const g = new THREE.Group();
+    const base = solid(new THREE.Mesh(G.coneBase, M.cone)); base.position.y = 0.025; g.add(base);
+    const body = solid(new THREE.Mesh(G.coneBody, M.cone)); body.position.y = 0.3; g.add(body);
+    const ring = solid(new THREE.Mesh(G.coneRing, M.coneBand)); ring.position.y = 0.33; g.add(ring);
+    return g;
+  }
+
+  // Alley AC / HVAC unit (industrial). 2 meshes.
+  function makeHvac() {
+    const g = new THREE.Group();
+    const box = solid(new THREE.Mesh(G.hvac, M.hvac)); box.position.y = 0.35; g.add(box);
+    const fan = solid(new THREE.Mesh(G.hvacFan, M.metalDark)); fan.rotation.x = Math.PI / 2; fan.position.set(0, 0.36, 0.51); g.add(fan);
+    return g;
+  }
+
   // ============================================================
   // FLAT ROAD PAINT — crosswalks at intersections + a short centre-line dash run
   // on the approaches. Built as thin Planes laid on the asphalt (y just above 0)
@@ -365,7 +550,11 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
   // ============================================================
 
   // counters so we report a believable mix and stay under MAX_PROPS
-  const counts = { tree: 0, hydrant: 0, bench: 0, planter: 0, trash: 0, bush: 0, lamp: 0 };
+  const counts = {
+    tree: 0, hydrant: 0, bench: 0, planter: 0, trash: 0, bush: 0, lamp: 0,
+    dumpster: 0, car: 0, sign: 0, shopsign: 0, fence: 0, bollard: 0,
+    mailbox: 0, barrel: 0, busstop: 0, cone: 0, hvac: 0,
+  };
 
   // Add a solid prop instance at (x,z) facing yaw; records it for spacing + budget.
   function place(kind, x, z, yaw, minD, corePad) {
@@ -380,13 +569,24 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
       case 'trash': m = makeTrashCan(); break;
       case 'bush': m = makeBush(); break;
       case 'lamp': m = makeLampPost(); break;
+      case 'dumpster': m = makeDumpster(); break;
+      case 'car': m = makeParkedCar(); break;
+      case 'sign': m = makeStreetSign(); break;
+      case 'shopsign': m = makeShopSign(); break;
+      case 'fence': m = makeFence(); break;
+      case 'bollard': m = makeBollard(); break;
+      case 'mailbox': m = makeMailbox(); break;
+      case 'barrel': m = makeBarrel(chance(0.45)); break;
+      case 'busstop': m = makeBusStop(); break;
+      case 'cone': m = makeTrafficCone(); break;
+      case 'hvac': m = makeHvac(); break;
       default: return false;
     }
     m.position.set(x, 0, z);
     m.rotation.y = yaw != null ? yaw : rand(0, Math.PI * 2);
     root.add(m);
     placed.push({ x, z });
-    counts[kind]++;
+    counts[kind] = (counts[kind] || 0) + 1;
     return true;
   }
 
@@ -406,31 +606,79 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
     }
   }
 
-  // ---- 2) SIDEWALK FURNITURE around each occupied block ----------------------
-  // Walk the four sidewalk edges of every block. Each edge offers a row of slots;
-  // we sample a subset and drop a type weighted toward trees, with the prop
-  // pushed onto the sidewalk ring and oriented to face the street (outward).
+  // Sidewalk edge basis shared by the furniture passes (each block has 4 edges).
   const EDGES = [
     { nx: 0, nz: -1, yaw: 0 },          // -Z edge faces toward -Z street
     { nx: 0, nz: 1, yaw: Math.PI },     // +Z edge
     { nx: -1, nz: 0, yaw: Math.PI / 2 },// -X edge
     { nx: 1, nz: 0, yaw: -Math.PI / 2 },// +X edge
   ];
-  // ordered slot positions along an edge (perpendicular offset from centre)
-  const SLOTS = [-7, -4.6, -2.2, 0, 2.2, 4.6, 7];
 
-  // a weighted bag for sidewalk picks (trees dominate, then benches/planters/etc.)
-  const sidewalkBag = [
-    'tree', 'tree', 'tree', 'tree',
-    'bush', 'bush',
-    'bench', 'planter',
-    'trash', 'lamp',
-  ];
-
-  // Soft per-block budget so no single block hogs the cap and every block gets
-  // dressed — keeps trees from saturating MAX_PROPS before later blocks/types.
+  // ---- 2) ZONE FEATURES — the SIGNATURE props that give each neighbourhood its
+  // identity (industrial dumpsters/fences, downtown bus-stops/shop signs,
+  // residential fences/mailboxes). Run FIRST after corner accents so the headline
+  // content is ALWAYS placed before the heavier tree/bench fill (pass 4) can eat
+  // the prop budget — otherwise these silently drop at the production bound.
   for (const b of blocks) {
     if (placed.length >= MAX_PROPS) break;
+    const e = EDGES[(rng() * EDGES.length) | 0];
+    const along = { x: -e.nz, z: e.nx };
+    const off = rand(-3, 3);
+    const ex = b.cx + e.nx * (SIDEWALK + 0.4) + along.x * off;
+    const ez = b.cz + e.nz * (SIDEWALK + 0.4) + along.z * off;
+    if (b.zone === 'industrial') {
+      place('dumpster', ex, ez, e.yaw + rand(-0.2, 0.2), 3.0, 0.3);
+      const e2 = EDGES[(rng() * EDGES.length) | 0];
+      place('fence', b.cx + e2.nx * (SIDEWALK + 1.0), b.cz + e2.nz * (SIDEWALK + 1.0), e2.yaw + Math.PI / 2, 3.0, 0.4);
+    } else if (b.zone === 'downtown') {
+      if (chance(0.5)) place('busstop', ex, ez, e.yaw + Math.PI, 3.4, 0.4);
+      else place('shopsign', ex, ez, e.yaw, 2.4, 0.3);
+    } else if (b.zone === 'residential') {
+      if (chance(0.7)) place('fence', ex, ez, e.yaw + Math.PI / 2, 3.0, 0.4);
+      if (chance(0.4)) place('mailbox', b.cx + e.nx * (SIDEWALK + 1.2) + along.x * (off + 2), b.cz + e.nz * (SIDEWALK + 1.2) + along.z * (off + 2), e.yaw, 2.2, 0.3);
+    } else {
+      if (chance(0.4)) place('sign', ex, ez, rand(0, Math.PI * 2), 2.4, 0.3);
+    }
+  }
+
+  // ---- 3) PARKED CARS — line a subset of street kerbs with parked cars. They
+  // sit just off the sidewalk on the asphalt, nose along the street, clear of the
+  // cross-walks and plaza. Sparse so traffic lanes stay drivable. (Decorative —
+  // not added to onfoot3d's collision aabbs, matching every other detail prop.)
+  {
+    const STREET = ROAD_OFFSET;                 // kerb-side streets at ±12, ±36, ±60
+    const carLines = [];
+    for (let k = -GRID; k <= GRID; k++) { const v = k * BLOCK + STREET; if (Math.abs(v) <= BOUND - 6) carLines.push(v); }
+    for (const lx of carLines) {
+      for (let z = -BOUND + 12; z <= BOUND - 12; z += rand(10, 16)) {
+        if (placed.length >= MAX_PROPS) break;
+        if (!chance(0.5)) continue;
+        if (Math.hypot(lx, z) < PLAZA_R + 4) continue;
+        // park on whichever side of the street line has room; nose along Z
+        const side = chance(0.5) ? 1 : -1;
+        place('car', lx + side * 1.6, z, Math.PI / 2 + (chance(0.5) ? Math.PI : 0), 4.0, 0.0);
+      }
+    }
+  }
+
+  // ---- 4) SIDEWALK FILL — trees/benches/planters/etc. fill the remaining slots
+  // around each block with whatever budget the signature passes left. Walk the
+  // four sidewalk edges; sample a subset of slots; pick from a zone-weighted bag.
+  // ordered slot positions along an edge (perpendicular offset from centre)
+  const SLOTS = [-7, -4.6, -2.2, 0, 2.2, 4.6, 7];
+  // weighted sidewalk bags per zone — each neighbourhood gets furniture that fits:
+  // downtown benches/planters/signage, midtown leafy commercial, residential
+  // tree-lined with mailboxes, industrial sparse with cones/barrels/signs.
+  const zoneBags = {
+    downtown:    ['tree', 'bench', 'bench', 'planter', 'planter', 'trash', 'lamp', 'shopsign', 'bollard', 'bush'],
+    midtown:     ['tree', 'tree', 'tree', 'bush', 'bench', 'planter', 'trash', 'lamp', 'sign'],
+    residential: ['tree', 'tree', 'tree', 'tree', 'bush', 'bush', 'mailbox', 'bench', 'sign'],
+    industrial:  ['cone', 'cone', 'barrel', 'trash', 'sign', 'bollard', 'bush', 'hvac', 'lamp'],
+  };
+  // Soft per-block budget so no single block hogs the cap and every block gets dressed.
+  for (const b of blocks) {
+    if (placed.length >= MAX_PROPS) break;
+    const bag = zoneBags[b.zone] || zoneBags.midtown;
     let perBlock = 0;
     for (const e of EDGES) {
       if (perBlock >= 4) break;
@@ -448,7 +696,7 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
         const along = { x: -e.nz, z: e.nx };
         const x = ex + along.x * off + rand(-0.4, 0.4);
         const z = ez + along.z * off + rand(-0.4, 0.4);
-        const kind = pick(sidewalkBag);
+        const kind = pick(bag);
         // trees/bushes get a little yaw wobble; furniture faces the street square.
         if (place(kind, x, z, e.yaw + (kind === 'tree' || kind === 'bush' ? rand(-0.3, 0.3) : 0), 2.4, 0.2)) perBlock++;
       }
@@ -473,8 +721,8 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
   // crosswalk bands on the four approaches of a handful of intersections and a
   // short dashed centre-line down the nearest street segment.
   const lines = [];
-  for (let k = -2; k <= 2; k++) {
-    const v = k * BLOCK + ROAD_OFFSET;          // e.g. -36,-12,12,36 (60 clamped out)
+  for (let k = -GRID; k <= GRID; k++) {
+    const v = k * BLOCK + ROAD_OFFSET;          // street lines ±12, ±36, ±60 on the 7x7 map
     if (Math.abs(v) <= BOUND - 2) lines.push(v);
   }
   // de-dupe + sort

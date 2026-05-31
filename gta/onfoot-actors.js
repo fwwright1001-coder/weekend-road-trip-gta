@@ -22,7 +22,9 @@ import { GTA } from './core.js';
 
 const MODEL_URL = new URL('../assets/models/Soldier.glb', import.meta.url).href;
 const TARGET_HEIGHT = 1.8;          // normalize the model to ~human height (matches the box-person)
-const FACING = 0;                   // model front is +Z (matches buildPerson). If people face backward, set Math.PI.
+const FACING = Math.PI;             // Soldier.glb's rig front is -Z, so rotate inner 180° to face +Z (travel/
+                                    // camera convention). Per Lane A's REQUESTS.md finding (heel→toe points -Z
+                                    // at rotation.y=0); also aligns the actor-space accessories (brim front / pack back).
 const CLIPS = { idle: 'Idle', walk: 'Walk', run: 'Run' };   // clips this model has; missing ones are skipped
 
 // Procedural aim/gun rig — LIVE-EDITABLE in the console via window.ONFOOT_AIM
@@ -86,6 +88,53 @@ export function preloadActors() {
   return _loading;
 }
 
+// ---- crowd variety helpers -------------------------------------------------
+// All clones come off ONE soldier model, so without help every pedestrian looks
+// identical. We can't touch the rig (Lane A owns buildPerson), but makeActor is
+// ours — so we vary tint strength, desync the walk cycle, and bolt small original
+// accessories (caps, hard hats, beanies, backpacks, hi-vis vests, handbags) onto
+// the actor group. Accessories live in ACTOR space (feet at 0, ~1.8 tall) — not on
+// bones — so their size/placement is predictable regardless of the model's raw
+// scale; heights are scaled by scaleVar so they ride the head whatever the build.
+const _pickHex = (a) => a[(Math.random() * a.length) | 0];
+function _accMat(col, opts) {
+  return new THREE.MeshStandardMaterial(Object.assign({ color: col, roughness: 0.75 }, opts || {}));
+}
+function _addCivAccessories(g, sv) {
+  const y = (v) => v * sv;
+  // headgear (one of, or none)
+  const r = Math.random();
+  if (r < 0.30) {                                   // baseball cap (dome + brim)
+    const col = _pickHex([0xc0392b, 0x2c3e6b, 0x2d6a4f, 0x4a4a52, 0x8a5a2b, 0xb0832b]);
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), _accMat(col, { roughness: 0.7 }));
+    cap.scale.set(1.05, 0.82, 1.05); cap.position.y = y(1.78); cap.castShadow = true; g.add(cap);
+    const brim = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.02, 0.13), _accMat(col, { roughness: 0.7 }));
+    brim.position.set(0, y(1.755), 0.12); brim.castShadow = true; g.add(brim);
+  } else if (r < 0.44) {                            // hard hat (worker)
+    const hat = new THREE.Mesh(new THREE.SphereGeometry(0.12, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), _accMat(0xf2c33d, { roughness: 0.5 }));
+    hat.scale.set(1.05, 0.78, 1.18); hat.position.y = y(1.79); hat.castShadow = true; g.add(hat);
+  } else if (r < 0.55) {                            // knit beanie
+    const beanie = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.62), _accMat(_pickHex([0x333842, 0x6b3b3b, 0x2d4a5a, 0x554a2b]), { roughness: 0.95 }));
+    beanie.position.y = y(1.74); beanie.castShadow = true; g.add(beanie);
+  }
+  // backpack on the back
+  if (Math.random() < 0.26) {
+    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.34, 0.16), _accMat(_pickHex([0x2c3e6b, 0x3d6b2f, 0x6b2f3d, 0x33363c]), { roughness: 0.85 }));
+    pack.position.set(0, y(1.26), -0.17); pack.castShadow = true; g.add(pack);
+  }
+  // hi-vis safety vest (faintly emissive so it pops at dusk)
+  if (Math.random() < 0.14) {
+    const vest = new THREE.Mesh(new THREE.BoxGeometry(0.33, 0.36, 0.24), _accMat(0xeaff3a, { emissive: 0x9aa800, emissiveIntensity: 0.25, roughness: 0.6 }));
+    vest.position.y = y(1.18); vest.castShadow = true; g.add(vest);
+  }
+  // handbag at one hip
+  if (Math.random() < 0.14) {
+    const side = Math.random() < 0.5 ? -1 : 1;
+    const bag = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.2, 0.08), _accMat(_pickHex([0x5a3a2b, 0x2b2b33, 0x7a3a55]), { roughness: 0.7 }));
+    bag.position.set(side * 0.24, y(1.0), 0.04); bag.castShadow = true; g.add(bag);
+  }
+}
+
 // Build one character. Returns a Group (feet at origin, ~1.8 tall, facing +Z)
 // with userData.actor, or null if the model isn't ready (caller falls back).
 //   opts: { colorize?: hex, armed?: bool, scaleVar?: number }
@@ -99,16 +148,19 @@ export function makeActor(opts = {}) {
   inner.position.y = _footY * (opts.scaleVar || 1);
   inner.rotation.y = FACING;
 
+  // per-actor tint + strength (hoisted so every material on one person agrees,
+  // and the crowd spreads across light/strong tints rather than all looking the same)
+  const tint = opts.colorize != null ? new THREE.Color(opts.colorize) : null;
+  const tintAmt = 0.42 + Math.random() * 0.32;
   inner.traverse((o) => {
     if (!o.isMesh) return;
     o.castShadow = true; o.receiveShadow = true;
     o.frustumCulled = false;
     if (o.material) {
       o.material = Array.isArray(o.material) ? o.material.map((m) => m.clone()) : o.material.clone();
-      if (opts.colorize != null) {
-        const tint = new THREE.Color(opts.colorize);
+      if (tint) {
         const mats = Array.isArray(o.material) ? o.material : [o.material];
-        for (const m of mats) if (m.color) m.color.lerp(tint, 0.55);
+        for (const m of mats) if (m.color) m.color.lerp(tint, tintAmt);
       }
     }
   });
@@ -125,6 +177,14 @@ export function makeActor(opts = {}) {
   const actor = { mixer, actions, current: null, dead: false, armed: false, recoil: 0, bones: null, gun: null, gunRestZ: 0 };
   g.userData.actor = actor;
   if (actions.idle) { actions.idle.play(); actor.current = 'idle'; }
+  // crowd believability: vary each walker's gait speed slightly and desync the
+  // cycle so a group of peds doesn't march in perfect lockstep.
+  mixer.timeScale = 0.86 + Math.random() * 0.3;
+  try { mixer.update(Math.random() * 1.6); } catch (e) { /* harmless if no clip */ }
+
+  if (!opts.armed) {
+    try { _addCivAccessories(g, opts.scaleVar || 1); } catch (e) { /* accessories optional */ }
+  }
 
   if (opts.armed) {
     _wireBus();

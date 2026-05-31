@@ -354,6 +354,82 @@ function _drawBrick(size) {
   return cv;
 }
 
+// SIDEWALK — pale concrete pavers: a grid of slabs with darker joints, aggregate
+// speckle and a couple of hairline cracks. Tiles cleanly so a big pad reads as a
+// paved walk rather than flat grey.
+function _drawSidewalk(size) {
+  const made = _makeCanvas(size);
+  if (!made) return null;
+  const { cv, ctx } = made;
+  const rand = _rng(0x5DE7A1C);
+  _fill(ctx, size, '#9b968c');
+  _blotches(ctx, size, 10, rand, 0.06);
+  _speckle(ctx, size, Math.floor(size * size * 0.006), rand, { minA: 0.03, maxA: 0.12, rMin: 0.5, rMax: 1.6 });
+  _speckle(ctx, size, Math.floor(size * size * 0.0016), rand, { minA: 0.05, maxA: 0.14, rMin: 0.7, rMax: 1.7, tint: [120, 110, 96] });
+  // paver grid — 4x4 slabs with slight per-slab tone jitter
+  const slabs = 4, sw = size / slabs;
+  for (let r = 0; r < slabs; r++) for (let c = 0; c < slabs; c++) {
+    const v = (rand() - 0.5) * 16;
+    ctx.fillStyle = `rgba(${128 + v},${124 + v},${114 + v},0.10)`;
+    ctx.fillRect(c * sw + 1, r * sw + 1, sw - 2, sw - 2);
+  }
+  // joint lines (recessed dark grooves)
+  ctx.strokeStyle = 'rgba(58,56,52,0.5)';
+  ctx.lineWidth = Math.max(1.5, size * 0.01);
+  for (let i = 0; i <= slabs; i++) {
+    const p = i * sw;
+    ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, size); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(size, p); ctx.stroke();
+  }
+  // a couple of hairline cracks for wear
+  ctx.strokeStyle = 'rgba(50,48,46,0.4)';
+  for (let i = 0; i < 4; i++) {
+    ctx.lineWidth = 0.5 + rand() * 0.7;
+    let x = rand() * size, y = rand() * size; ctx.beginPath(); ctx.moveTo(x, y);
+    for (let s = 0; s < 3; s++) { x += (rand() - 0.5) * size * 0.18; y += (rand() - 0.5) * size * 0.18; ctx.lineTo(x, y); }
+    ctx.stroke();
+  }
+  return cv;
+}
+
+// FACADE B — a modern curtain-wall tower: continuous horizontal glass ribbons
+// between pale spandrel bands, with vertical mullions. Distinct from _drawFacade's
+// punched-window stucco so the skyline gets two clearly different building looks.
+function _drawFacadeB(size) {
+  const made = _makeCanvas(size);
+  if (!made) return null;
+  const { cv, ctx } = made;
+  const rand = _rng(0x6CACADE2);
+  // spandrel base
+  const wall = ctx.createLinearGradient(0, 0, 0, size);
+  wall.addColorStop(0, '#7f8690');
+  wall.addColorStop(1, '#6c727b');
+  ctx.fillStyle = wall; ctx.fillRect(0, 0, size, size);
+  _speckle(ctx, size, Math.floor(size * size * 0.003), rand, { minA: 0.02, maxA: 0.07, rMin: 0.5, rMax: 1.3 });
+  const floors = 5, fh = size / floors;
+  for (let r = 0; r < floors; r++) {
+    const y = r * fh;
+    // glass ribbon (occupies ~62% of the floor height)
+    const gy = y + fh * 0.2, gh = fh * 0.62;
+    const lit = rand() < 0.18;
+    const gl = ctx.createLinearGradient(0, gy, 0, gy + gh);
+    if (lit) { gl.addColorStop(0, '#ffe6a4'); gl.addColorStop(1, '#caa86e'); }
+    else { gl.addColorStop(0, '#8fb3c8'); gl.addColorStop(0.5, '#5f8197'); gl.addColorStop(1, '#41606f'); }
+    ctx.fillStyle = gl; ctx.fillRect(0, gy, size, gh);
+    // reflection sheen across the ribbon
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(0, gy + gh * 0.12, size, gh * 0.12);
+    // spandrel band above the glass
+    ctx.fillStyle = 'rgba(0,0,0,0.10)';
+    ctx.fillRect(0, y, size, fh * 0.2);
+  }
+  // vertical mullions
+  const cols = 5, cw = size / cols;
+  ctx.fillStyle = 'rgba(40,44,50,0.5)';
+  for (let c = 0; c <= cols; c++) ctx.fillRect(c * cw - 1, 0, 2, size);
+  return cv;
+}
+
 // ============================================================
 // PUBLIC: makeTextures(THREE) — build once, cache, return the set.
 // ============================================================
@@ -364,7 +440,7 @@ export function makeTextures(THREE) {
   if (_texTried && _texCache) return _texCache;
   _texTried = true;
 
-  const out = { asphalt: null, grass: null, concrete: null, facade: null, brick: null };
+  const out = { asphalt: null, grass: null, concrete: null, facade: null, facadeB: null, brick: null, sidewalk: null };
   if (!THREE || typeof THREE.CanvasTexture !== 'function') {
     _texCache = out;
     return out;
@@ -374,7 +450,9 @@ export function makeTextures(THREE) {
     out.grass = _toTexture(THREE, _drawGrass(512));
     out.concrete = _toTexture(THREE, _drawConcrete(256));
     out.facade = _toTexture(THREE, _drawFacade(512));
+    out.facadeB = _toTexture(THREE, _drawFacadeB(512));
     out.brick = _toTexture(THREE, _drawBrick(512));
+    out.sidewalk = _toTexture(THREE, _drawSidewalk(512));
   } catch (e) {
     // partial set is fine; beautifyScene tolerates nulls
     if (typeof console !== 'undefined') console.warn('[onfoot-textures] makeTextures partial:', e);
@@ -522,6 +600,18 @@ export function beautifyScene(THREE, scene, opts = {}) {
         }
       }
 
+      // --- SIDEWALK PADS (mid-size concrete planes around each block) --------
+      if (!mapped && plane && tex.sidewalk) {
+        const small = Math.min(plane.w, plane.h), big = Math.max(plane.w, plane.h);
+        if (small >= 8 && big < groundMinSize) {
+          const rep = Math.max(1, Math.round(plane.w / 5));   // ~5-unit paver slabs
+          mat.map = _repeated(tex.sidewalk, rep, rep);
+          mat.roughnessMap = _repeated(tex.sidewalk, rep, rep);
+          if (mat.roughness != null) mat.roughness = Math.max(mat.roughness, 0.95);
+          mapped = true;
+        }
+      }
+
       // --- BUILDING BOXES ----------------------------------------------------
       if (!mapped) {
         const box = _boxDims(obj);
@@ -529,10 +619,13 @@ export function beautifyScene(THREE, scene, opts = {}) {
           const tall = box.h > buildingMinH;
           const footOk = box.w > buildingMinFoot && box.d > buildingMinFoot;
           if (tall && footOk) {
-            // pick brick for some, facade for the rest, keyed off footprint so it's
-            // stable per building (no flicker if called twice).
-            const useBrick = (Math.round(box.w + box.d)) % 2 === 0;
-            const baseTex = useBrick ? (tex.brick || tex.facade) : (tex.facade || tex.brick);
+            // three building looks (punched-window stucco, glass curtain wall, brick)
+            // chosen by a STABLE hash of the footprint+height so each building keeps
+            // its look across calls (no flicker) but the skyline reads as varied.
+            const variants = [tex.facade, tex.facadeB, tex.brick].filter(Boolean);
+            const pool = variants.length ? variants : [tex.facade || tex.brick];
+            const hash = Math.round(box.w * 7 + box.d * 13 + box.h * 3);
+            const baseTex = pool[((hash % pool.length) + pool.length) % pool.length];
             if (baseTex) {
               // ~3m per facade tile vertically, ~4m horizontally — repeat by box size
               const repX = Math.max(1, Math.round(box.w / 4));
