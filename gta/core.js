@@ -138,7 +138,17 @@ GTA.bus = makeBus();
 // ============================================================
 GTA.register = function register(system) {
   if (!system || !system.name) throw new Error('GTA.register: system needs a name');
-  if (GTA.systems[system.name]) {
+  const existing = GTA.systems[system.name];
+  if (existing) {
+    // IDEMPOTENT re-register: the exact same object is being registered again
+    // (e.g. a module that self-registers on import AND is install()'d by the
+    // bridge). This is a no-op, not a replacement — return silently without the
+    // warn and without disturbing _order. init() is NOT re-run here; if we're
+    // booted the system was already init'd on its first registration, and its
+    // own _inited/_subscribed guards would no-op a second call anyway.
+    if (existing === system) return system;
+    // A genuinely DIFFERENT object is taking over an existing name — that IS a
+    // replacement and worth flagging.
     console.warn(`[GTA] system "${system.name}" already registered — replacing`);
     GTA._order = GTA._order.filter((n) => n !== system.name);
   }

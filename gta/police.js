@@ -34,6 +34,9 @@ const FIRE_CADENCE_HI  = 0.7;      // seconds between shots (high stars)
 const SHOT_DMG_MIN     = 6;        // bullet damage range -> 'damage' request
 const SHOT_DMG_MAX     = 10;
 const SHOT_RANGE       = 32;       // max distance a cop will actually hit at
+const SHOT_HIT_FLOOR   = 0.5;      // min per-shot hit chance at long range (raised so any wanted level reliably FEELS dangerous)
+const SHOT_GRAZE_MIN   = 2;        // a "miss" still grazes the player for a little HP...
+const SHOT_GRAZE_MAX   = 3;        // ...so being shot at with LOS always chips health (no free misses)
 const SPAWN_MIN_DIST   = 26;       // spawn cops at least this far from player
 const SPAWN_MAX_DIST   = 90;       // ...and no further than this
 const DESPAWN_DIST     = 170;      // cull wanderers that drift way off
@@ -536,17 +539,28 @@ const police = {
     let amount = GU.rand(this._rng, SHOT_DMG_MIN, SHOT_DMG_MAX) * falloff;
     if (this._stars >= 4) amount *= 1.2;
     amount *= GU.clamp(diff, 0.5, 2);
-    const hitChance = GU.clamp(1 - (dist / SHOT_RANGE) * 0.6, 0.35, 0.95);
-    if (this._rng() > hitChance) { if (ctx.bus) ctx.bus.emit('shake', { amount: 0.5 }); return; }
+    // hit-chance floor raised toward 0.5 so a cop with LOS lands solid shots often.
+    const hitChance = GU.clamp(1 - (dist / SHOT_RANGE) * 0.6, SHOT_HIT_FLOOR, 0.95);
+    const miss = this._rng() > hitChance;
 
     if (gangTgt) {
-      // cop vs gangster — deal damage directly (no player-crime, no player-shake)
+      // cop vs gangster — a clean miss is a clean miss (faction fight, no graze).
+      if (miss) return;
       this._damageGang(gangTgt, Math.round(amount), ctx);
       if (ctx.bus) ctx.bus.emit('faction:fight', { a: 'police', b: 'gang', pos: { x: tx, y: 1, z: tz } });
     } else if (ctx.bus) {
+      // vs the PLAYER: a hit deals full damage; a "miss" still grazes for a couple
+      // HP so being shot at with LOS always FEELS dangerous (no free misses). Both
+      // route through 'damage', which itself emits a scaled shake — so we don't.
+      const dealt = miss
+        ? Math.round(GU.rand(this._rng, SHOT_GRAZE_MIN, SHOT_GRAZE_MAX) * GU.clamp(diff, 0.5, 2))
+        : Math.round(amount);
+      if (dealt <= 0) return;
       const hp = player.pos ? _tmpA.copy(player.pos) : _tmpA.set(tx, 1, tz);
-      ctx.bus.emit('damage', { target: 'player', amount: Math.round(amount), kind: 'bullet', pos: hp.clone(), source: 'cop' });
-      ctx.bus.emit('shake', { amount: 0.9 });
+      ctx.bus.emit('damage', { target: 'player', amount: dealt, kind: miss ? 'graze' : 'bullet', pos: hp.clone(), source: 'cop' });
+      // a clean hit gets an extra kick on top of the damage-driven shake; a graze
+      // rides only the small shake 'damage' emits, so near-misses feel lighter.
+      if (!miss) ctx.bus.emit('shake', { amount: 0.9 });
     }
   },
 

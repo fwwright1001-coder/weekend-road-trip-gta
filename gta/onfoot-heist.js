@@ -19,9 +19,26 @@ const REACH_VAULT = 3.2;    // grab the goop
 const REACH_GETAWAY = 7.0;  // escape (must be in a vehicle)
 const PAYOUT = 5000;        // heist completion reward ($)
 
+// vault-crack dwell: you must STAY within REACH_VAULT this long to crack the
+// vault and grab the goop (no more instant-grab teleport feel).
+const CRACK_TIME = 1.6;     // seconds of dwell to crack the vault
+
+// vault guards (a real encounter at the loot): a handful of dark-suited shooters
+// that defend the goop. They are pushed into ctx.targets so combat.js can raycast
+// + onHit them, and they periodically request 'damage' on the player while alive
+// and within LOS range.
+const GUARD_COUNT = 3;          // guards spawned at the vault
+const GUARD_HP = 60;            // hp per guard (combat differentiates weapon dmg for free)
+const GUARD_RANGE = 12;         // metres: guards only shoot when this close (LOS proxy)
+const GUARD_FIRE_EVERY = 0.8;   // seconds between guard shots
+const GUARD_DMG = 6;            // damage per guard shot (drains armor/health)
+const GUARD_HEIGHT = 1.7;
+const GUARD_RADIUS = 0.6;
+
 let bank = null;            // {position, doorPos, vaultPos, footprints}
 let goopMesh = null, beacon = null, getawayMesh = null;
 let winEl = null;
+let guards = [];            // active vault guards (ctx.targets entries + per-guard sim state)
 const GETAWAY = { x: 36, z: 36 };   // open street intersection (k*24+12)
 
 const heist = {
@@ -29,9 +46,24 @@ const heist = {
   state: 'toBank',          // toBank -> grabGoop -> escape -> won
   hasGoop: false,
   built: false,
+  _crackT: 0,               // vault-crack dwell progress (seconds)
+  _wiredDeath: false,       // one-time playerWasted/playerBusted subscription guard
 
   init(ctx) {
     const THREE = ctx.THREE;
+    this._ctx = ctx;
+
+    // DROP-THE-GOOP ON DEATH: if the player dies (wasted) or is arrested
+    // (busted) while carrying the goop (state==='escape'), they lose it and the
+    // heist reverts to 'grabGoop' — the goop reappears at the vault. Wired once;
+    // survives respawns (subscriptions persist across reset()).
+    if (!this._wiredDeath && ctx.bus && typeof ctx.bus.on === 'function') {
+      const drop = () => { try { this._dropGoop(); } catch (e) {} };
+      ctx.bus.on('playerWasted', drop);
+      ctx.bus.on('playerBusted', drop);
+      this._wiredDeath = true;
+    }
+
     if (!this.built) {
       // build the bank + register its walls for collision
       try {
@@ -69,12 +101,111 @@ const heist = {
   _restart() {
     this.state = 'toBank';
     this.hasGoop = false;
+    this._crackT = 0;
+    this._clearGuards();
     if (goopMesh) goopMesh.visible = true;
     if (beacon && bank) { beacon.position.x = bank.doorPos.x; beacon.position.z = bank.doorPos.z; beacon.material.color.setHex(0xffd23a); }
     if (getawayMesh) getawayMesh.visible = false;
   },
 
   reset() { /* keep heist progress across deaths/respawns; a full restart happens via forceRestart() on re-enter */ },
+
+  // ----- VAULT GUARDS -------------------------------------------------------
+  // Spawn GUARD_COUNT shootable guards around the vault pedestal. Each is a
+  // ctx.targets entry (so combat.js raycasts + onHit them) plus per-guard sim
+  // state (fire cadence). Meshes are built only when !ctx.headless; the
+  // targeting + damage logic runs headless so the sim exercises it.
+  _spawnGuards(ctx) {
+    if (guards.length) return;            // already spawned for this attempt
+    if (!bank) return;
+    const THREE = ctx.THREE;
+    const vx = bank.vaultPos.x, vz = bank.vaultPos.z;
+    for (let i = 0; i < GUARD_COUNT; i++) {
+      // arc the guards across the front of the vault chamber, toward the player
+      const a = (i - (GUARD_COUNT - 1) / 2) * 0.7;   // fan out in X
+      const pos = new THREE.Vector3(vx + Math.sin(a) * 2.6, 0, vz + 1.6 + Math.cos(a) * 0.4);
+      const guard = {
+        pos,
+        height: GUARD_HEIGHT,
+        radius: GUARD_RADIUS,
+        kind: 'guard',
+        dead: false,
+        hp: GUARD_HP,
+        mesh: null,
+        _fireT: GUARD_FIRE_EVERY * (0.4 + i * 0.25),   // stagger first shots
+        onHit(dmg) {
+          if (this.dead) return;
+          this.hp -= dmg;
+          if (this.hp <= 0) {
+            this.dead = true;
+            if (this.mesh) this.mesh.visible = false;
+            // count as a 'cop' kill so combat/stat tracking treats it as a hostile down
+            GTA.bus.emit('entityKilled', { entity: this, kind: 'cop', pos: this.pos, byPlayer: true });
+          }
+        },
+      };
+      if (!ctx.headless) {
+        try {
+          guard.mesh = buildGuard(THREE);
+          guard.mesh.position.set(pos.x, 0, pos.z);
+          ctx.scene.add(guard.mesh);
+        } catch (e) { guard.mesh = null; }
+      }
+      guards.push(guard);
+      if (Array.isArray(ctx.targets)) ctx.targets.push(guard);
+    }
+  },
+
+  // remove guards from ctx.targets, mark dead, hide/drop meshes
+  _clearGuards() {
+    const ctx = this._ctx;
+    if (guards.length && ctx && Array.isArray(ctx.targets)) {
+      // splice in place (don't reassign — other systems push onto this same array)
+      for (let i = ctx.targets.length - 1; i >= 0; i--) {
+        if (guards.indexOf(ctx.targets[i]) >= 0) ctx.targets.splice(i, 1);
+      }
+    }
+    for (const g of guards) {
+      g.dead = true;
+      if (g.mesh) {
+        g.mesh.visible = false;
+        try { if (g.mesh.parent) g.mesh.parent.remove(g.mesh); } catch (e) {}
+        g.mesh = null;
+      }
+    }
+    guards = [];
+  },
+
+  // per-frame guard behaviour: living guards within GUARD_RANGE of the player
+  // periodically request 'damage' on the player.
+  _updateGuards(dt, ctx) {
+    if (!guards.length) return;
+    const p = ctx.player.pos;
+    for (const g of guards) {
+      if (g.dead) continue;
+      const d = Math.hypot(g.pos.x - p.x, g.pos.z - p.z);
+      if (d > GUARD_RANGE) { g._fireT = Math.min(g._fireT, GUARD_FIRE_EVERY); continue; }
+      g._fireT -= dt;
+      if (g._fireT <= 0) {
+        g._fireT = GUARD_FIRE_EVERY;
+        GTA.bus.emit('damage', { target: 'player', amount: GUARD_DMG, kind: 'guard', pos: g.pos });
+      }
+    }
+  },
+
+  // DROP THE GOOP: revert escape -> grabGoop, re-show the goop at the vault,
+  // hide the getaway pad, re-point the beacon to the vault.
+  _dropGoop() {
+    if (this.state !== 'escape') return;
+    this.state = 'grabGoop';
+    this.hasGoop = false;
+    this._crackT = 0;
+    this._alarm = null;
+    if (goopMesh) goopMesh.visible = true;
+    if (getawayMesh) getawayMesh.visible = false;
+    if (beacon && bank) { beacon.position.x = bank.vaultPos.x; beacon.position.z = bank.vaultPos.z; beacon.material.color.setHex(0xffd23a); }
+    GTA.bus.emit('toast', { html: 'You <b>dropped the goop</b>! Get back to the vault and grab it again.', ms: 6000 });
+  },
 
   update(dt, ctx) {
     if (!bank) return;
@@ -87,23 +218,29 @@ const heist = {
     if (this.state === 'toBank') {
       if (dist(p, bank.doorPos) < REACH_BANK) {
         this.state = 'grabGoop';
+        this._crackT = 0;
+        this._spawnGuards(ctx);   // the vault is defended — guards spawn on entry
         if (beacon) { beacon.position.x = bank.vaultPos.x; beacon.position.z = bank.vaultPos.z; }
-        GTA.bus.emit('toast', { html: 'Inside the bank. Get to the <b>vault</b> and grab the goop.', ms: 4500 });
+        GTA.bus.emit('toast', { html: 'Inside the bank. Fight to the <b>vault</b> and crack it — the guards are armed.', ms: 4500 });
       }
     } else if (this.state === 'grabGoop') {
+      // guards defend the loot while you work
+      this._updateGuards(dt, ctx);
+
+      // VAULT-CRACK DWELL: you must STAY within REACH_VAULT for CRACK_TIME to
+      // crack the vault. Leaving the radius resets the progress.
       if (dist(p, bank.vaultPos) < REACH_VAULT) {
-        this.state = 'escape';
-        this.hasGoop = true;
-        if (goopMesh) goopMesh.visible = false;
-        if (getawayMesh) getawayMesh.visible = true;
-        if (beacon) { beacon.position.x = GETAWAY.x; beacon.position.z = GETAWAY.z; beacon.material.color.setHex(0x5aff8a); }
-        // ALARM — the heat RAMPS up (~2 -> ~3 -> 5 stars over ~2s) instead of
-        // snapping straight to max, so you get a beat to react before the full
-        // swarm. The rest of the climb happens in the 'escape' branch below.
-        this._alarm = { t: 0, beat: 0 };
-        try { if (ctx.systems.wanted) { ctx.systems.wanted.api.add(2.5); ctx.systems.wanted.api.setSeen(true); } } catch (e) {}
-        GTA.bus.emit('shake', { amount: 1.0 });
-        GTA.bus.emit('toast', { html: 'You’ve got the <b>goop</b>! Alarm’s tripped — <b>steal a car and escape</b> to the green marker.', ms: 7000 });
+        const wasCracking = this._crackT > 0;
+        this._crackT += dt;
+        const pct = Math.min(100, Math.round((this._crackT / CRACK_TIME) * 100));
+        if (!wasCracking) GTA.bus.emit('toast', { html: 'Cracking the vault…', ms: 1200 });
+        GTA.bus.emit('toast', { html: `Cracking the vault… <b>${pct}%</b>`, ms: 700 });
+        if (this._crackT >= CRACK_TIME) {
+          this._grabGoop(ctx);
+        }
+      } else if (this._crackT > 0) {
+        this._crackT = 0;
+        GTA.bus.emit('toast', { html: 'Vault crack interrupted — get back to the vault.', ms: 1500 });
       }
     } else if (this.state === 'escape') {
       // escalate the alarm over a couple of seconds and keep it blaring until you're clear
@@ -112,9 +249,9 @@ const heist = {
         try {
           const w = ctx.systems.wanted;
           if (w) {
-            w.setSeen(true);
-            if (this._alarm.beat === 0 && this._alarm.t > 0.7) { w.add(2); this._alarm.beat = 1; }
-            else if (this._alarm.beat === 1 && this._alarm.t > 1.6) { w.add(3); this._alarm.beat = 2; }
+            w.api.setSeen(true);
+            if (this._alarm.beat === 0 && this._alarm.t > 0.7) { w.api.add(2); this._alarm.beat = 1; }
+            else if (this._alarm.beat === 1 && this._alarm.t > 1.6) { w.api.add(3); this._alarm.beat = 2; }
           }
         } catch (e) {}
       }
@@ -126,7 +263,25 @@ const heist = {
     }
   },
 
+  // GRAB: the vault is cracked — take the goop, trip the alarm, start the escape.
+  _grabGoop(ctx) {
+    this.state = 'escape';
+    this.hasGoop = true;
+    this._crackT = 0;
+    if (goopMesh) goopMesh.visible = false;
+    if (getawayMesh) getawayMesh.visible = true;
+    if (beacon) { beacon.position.x = GETAWAY.x; beacon.position.z = GETAWAY.z; beacon.material.color.setHex(0x5aff8a); }
+    // ALARM — the heat RAMPS up (2.5 -> 4.5 -> 7.5 over ~1.6s) instead of
+    // snapping straight to max, so you get a beat to react before the full
+    // swarm. The rest of the climb happens in the 'escape' branch above.
+    this._alarm = { t: 0, beat: 0 };
+    try { if (ctx.systems.wanted) { ctx.systems.wanted.api.add(2.5); ctx.systems.wanted.api.setSeen(true); } } catch (e) {}
+    GTA.bus.emit('shake', { amount: 1.0 });
+    GTA.bus.emit('toast', { html: 'You’ve got the <b>goop</b>! Alarm’s tripped — <b>steal a car and escape</b> to the green marker.', ms: 7000 });
+  },
+
   _win(ctx) {
+    this._clearGuards();   // any guards still standing leave the encounter on the win
     let total = null;
     try { if (ctx.systems.economy) total = ctx.systems.economy.api.add(PAYOUT, 'heist'); } catch (e) {}   // add() returns the new balance
     try { if (ctx.systems.wanted) ctx.systems.wanted.api.clear(); } catch (e) {}
@@ -163,6 +318,30 @@ const heist = {
 };
 
 function dist(a, b) { return Math.hypot(a.x - b.x, a.z - b.z); }
+
+// A simple low-poly dark-suited "guard" box-figure (legs/torso/arms/head + a
+// stubby gun). Built only when a scene exists; the heist targeting/damage logic
+// runs headless without it. Origin at the feet (y=0), faces +Z by default.
+function buildGuard(THREE) {
+  const g = new THREE.Group();
+  const suit = new THREE.MeshStandardMaterial({ color: 0x23262e, roughness: 0.7, metalness: 0.1 });
+  const skin = new THREE.MeshStandardMaterial({ color: 0xc79a73, roughness: 0.8 });
+  const gunMat = new THREE.MeshStandardMaterial({ color: 0x33373d, roughness: 0.4, metalness: 0.6 });
+  const mk = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = true; m.receiveShadow = true; g.add(m); return m; };
+  // legs
+  mk(new THREE.BoxGeometry(0.22, 0.85, 0.26), suit, -0.16, 0.43, 0);
+  mk(new THREE.BoxGeometry(0.22, 0.85, 0.26), suit, 0.16, 0.43, 0);
+  // torso
+  mk(new THREE.BoxGeometry(0.62, 0.78, 0.34), suit, 0, 1.22, 0);
+  // arms (right arm forward, holding the gun)
+  mk(new THREE.BoxGeometry(0.18, 0.7, 0.2), suit, -0.42, 1.2, 0);
+  mk(new THREE.BoxGeometry(0.18, 0.5, 0.2), suit, 0.42, 1.15, 0.18);
+  // head
+  mk(new THREE.BoxGeometry(0.3, 0.34, 0.3), skin, 0, 1.78, 0);
+  // stubby gun out front
+  mk(new THREE.BoxGeometry(0.12, 0.12, 0.55), gunMat, 0.42, 1.05, 0.45);
+  return g;
+}
 
 function showWin(total) {
   const frame = document.getElementById('frame') || document.body;

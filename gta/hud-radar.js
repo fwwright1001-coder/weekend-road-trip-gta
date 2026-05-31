@@ -252,8 +252,21 @@ const sys = {
           const OF = (typeof window !== 'undefined') && window.ONFOOT;
           if (!OF || !OF.active) return;
           const locked = !!document.pointerLockElement;
-          if (locked) { if (this._menuOpen) this._closeMenu(); }
-          else if (!this._menuOpen && OF.internals && OF.internals.mode === 'foot') this._openMenu();   // foot only (car-entry unlock has mode 'drive')
+          if (locked) { this._everLocked = true; if (this._menuOpen) this._closeMenu(); }
+          // Only auto-open the menu when a REAL lock is RELEASED (the Esc-to-release case).
+          // In an embedded / unfocused context pointer lock is never granted, so a
+          // lock-loss event must NOT pop the settings menu mid-action — that brittle
+          // focus coupling was what made the menu "keep reopening" in sandboxes.
+          else if (this._everLocked && !this._menuOpen && OF.internals && OF.internals.mode === 'foot') this._openMenu();
+        } catch (e) { /* optional */ }
+      }, false);
+      // Pausing on a genuinely HIDDEN tab is correct; merely losing window focus while
+      // still visible is not (that's the multi-monitor / click-to-focus false-pause).
+      document.addEventListener('visibilitychange', () => {
+        try {
+          const OF = (typeof window !== 'undefined') && window.ONFOOT;
+          if (OF && OF.active && document.visibilityState === 'hidden'
+              && !this._menuOpen && OF.internals && OF.internals.mode === 'foot') this._openMenu();
         } catch (e) { /* optional */ }
       }, false);
     }
@@ -291,8 +304,10 @@ const sys = {
     this._menu.classList.add('hidden');
     if (typeof document !== 'undefined') document.body.classList.remove('gta-menu-open');
     try { if (window.ONFOOT) window.ONFOOT.paused = false; } catch (e) {}
-    // best-effort re-lock so the player drops straight back into the action
-    try { const I = window.ONFOOT && window.ONFOOT.internals; if (I && I.canvas && I.canvas.requestPointerLock) I.canvas.requestPointerLock(); } catch (e) {}
+    // best-effort re-lock so the player drops straight back into the action — but ONLY
+    // if pointer lock has ever actually worked here. Re-requesting in a context that
+    // refuses it just bounces lock-loss -> reopen-menu -> close -> re-request forever.
+    try { if (this._everLocked) { const I = window.ONFOOT && window.ONFOOT.internals; if (I && I.canvas && I.canvas.requestPointerLock) I.canvas.requestPointerLock(); } } catch (e) {}
   },
 
   // --------------------------------------------------------

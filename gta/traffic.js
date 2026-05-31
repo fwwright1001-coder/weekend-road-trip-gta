@@ -18,13 +18,23 @@
 // ============================================================
 import { GTA, GU } from './core.js';
 
-const TRAFFIC_MAX    = 6;     // hard cap on ambient cars (perf)
-const SPAWN_INTERVAL = 0.6;   // seconds between spawns while under the cap
+const TRAFFIC_MAX    = 16;    // hard cap on ambient cars (perf)
+const SPAWN_INTERVAL = 0.3;   // seconds between spawns while under the cap
 const SPAWN_MIN_DIST = 24;    // spawn this far from the player at least
 const SPAWN_MAX_DIST = 85;
 const RECYCLE_DIST   = 150;   // relocate a car that drifts past this (cheap despawn)
 const CRUISE_SPEED   = 9;     // m/s
 const HALF = Math.PI / 2;
+
+// car-to-car avoidance: scan a short forward cone and brake/steer off any car ahead
+const AVOID_RANGE    = 6;     // m — only cars within this distance matter
+const AVOID_RANGE_SQ = AVOID_RANGE * AVOID_RANGE;
+const AVOID_DOT      = 0.7;   // cos of the half-cone: only count cars roughly ahead
+// flee-from-violence: gunfire/explosions scare nearby cars into a brief sprint away
+const FLEE_RADIUS    = 22;    // m — events within this spook a car
+const FLEE_RADIUS_SQ = FLEE_RADIUS * FLEE_RADIUS;
+const FLEE_TIME      = 3;     // s of panic before decaying back to cruising
+const FLEE_SPEED_MUL = 1.9;   // target-speed boost while fleeing
 const COLORS = [0x9aa0a6, 0x2f6f8f, 0xb5432e, 0xece8df, 0x3a3f4a, 0x2b6b3a, 0xc8a24a];
 
 const traffic = {
@@ -40,6 +50,15 @@ const traffic = {
     this._ctx = ctx;
     this._rng = (GU && GU.makeRng) ? GU.makeRng(0x7AFF1C ^ 0x33) : Math.random;
     if (Array.isArray(ctx.traffic)) ctx.traffic.length = 0;
+
+    // REACT TO VIOLENCE: gunfire and explosions scare nearby cars into a brief
+    // flee state (raised target speed + steer away from the event). Cheap: just
+    // tag cars in radius; _driveCar applies + decays the panic.
+    const bus = ctx.bus;
+    if (bus) {
+      bus.on('crime', (e) => { if (e && e.kind === 'gunfire') this._scare(e.pos); });
+      bus.on('fx:explosion', (e) => { if (e) this._scare(e.pos, 1.4); });
+    }
     this._built = true;
   },
 
@@ -91,7 +110,7 @@ const traffic = {
     const v = vehApi.spawnTraffic ? vehApi.spawnTraffic(sx, sz, opts) : vehApi.spawnAt(sx, sz, opts);
     if (!v) return;
     v.isTraffic = true;
-    const tc = { v, heading, speed: CRUISE_SPEED * GU.rand(rng, 0.8, 1.15), turnCd: GU.rand(rng, 2, 6) };
+    const tc = { v, heading, speed: CRUISE_SPEED * GU.rand(rng, 0.8, 1.15), turnCd: GU.rand(rng, 2, 6), fleeT: 0, fleeX: 0, fleeZ: 0 };
     this._cars.push(tc);
     if (Array.isArray(ctx.traffic)) ctx.traffic.push(v);
     if (ctx.bus) ctx.bus.emit('traffic:spawned', { vehicle: v, pos: { x: sx, y: 0, z: sz } });
@@ -103,8 +122,40 @@ const traffic = {
 
     const fx = Math.sin(tc.heading), fz = Math.cos(tc.heading);
     let speed = tc.speed;
+
+    // FLEE: while panicking, floor it and steer the heading away from the event,
+    // then decay the panic back to cruising. Steering nudges heading toward the
+    // away-vector before it snaps to the road axis on the next turn.
+    if (tc.fleeT > 0) {
+      tc.fleeT -= dt;
+      speed = tc.speed * FLEE_SPEED_MUL;
+      const ax = pos.x - tc.fleeX, az = pos.z - tc.fleeZ;
+      if (ax || az) {
+        const away = Math.atan2(ax, az);
+        tc.heading = GU.lerpAngle(tc.heading, away, Math.min(1, dt * 3));
+      }
+    }
+
     // brake if the player is close ahead (cheap collision-avoidance)
     if (GU.dist2D(pos.x + fx * 4, pos.z + fz * 4, px, pz) < 3.5) speed *= 0.2;
+
+    // CAR-TO-CAR AVOIDANCE: brake (and lightly steer off) any live car sitting in
+    // a short forward cone. O(n^2) over ~16 cars — cheap and headless-safe.
+    let nudge = 0;
+    for (const oc of this._cars) {
+      if (oc === tc) continue;
+      const ov = oc.v; if (!ov || !ov.pos) continue;
+      const dx = ov.pos.x - pos.x, dz = ov.pos.z - pos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > AVOID_RANGE_SQ || d2 < 1e-6) continue;
+      const inv = 1 / Math.sqrt(d2);
+      const dot = (dx * inv) * fx + (dz * inv) * fz;   // forward · toOther
+      if (dot <= AVOID_DOT) continue;                  // not ahead → ignore
+      speed *= 0.15;                                   // someone's ahead → brake hard
+      // steer away from its side: sign of the cross product (forward × toOther)
+      nudge += (fx * dz - fz * dx) < 0 ? 0.6 : -0.6;
+    }
+    if (nudge) tc.heading += nudge * dt;
 
     const bx = pos.x, bz = pos.z;
     pos.x += fx * speed * dt; pos.z += fz * speed * dt;
@@ -121,6 +172,19 @@ const traffic = {
     if (v.mesh) { v.mesh.position.copy(pos); v.mesh.rotation.y = tc.heading; }
     v.heading = tc.heading; v.speed = speed;
     if (v.wheels) for (const w of v.wheels) w.rotation.x -= speed * dt * 0.6;
+  },
+
+  // tag every car within FLEE_RADIUS of a violent event so _driveCar makes it bolt.
+  _scare(pos, mul = 1) {
+    if (!pos) return;
+    const ex = pos.x || 0, ez = pos.z || 0;
+    for (const tc of this._cars) {
+      const v = tc.v; if (!v || !v.pos || v.occupied) continue;
+      const dx = v.pos.x - ex, dz = v.pos.z - ez;
+      if (dx * dx + dz * dz > FLEE_RADIUS_SQ * mul * mul) continue;
+      tc.fleeT = FLEE_TIME;
+      tc.fleeX = ex; tc.fleeZ = ez;
+    }
   },
 
   _turn(tc, world, pos) {

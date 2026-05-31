@@ -45,6 +45,7 @@ let _detailBuilt = false;
 let _realism = null, _realismBuilt = false;   // post-FX + textures pipeline (browser only)
 let _fxLoaded = false;                         // gta/fx.js (Lane B) — optional particle/FX module
 let _audioLoaded = false;                      // gta/audio.js (Lane B) — optional audio module
+let _lastWeather = null;                       // mirror OF.weather onto the bus so audio reacts to rain/fog
 
 // ---- real input state (fed to combat.js) -----------------------------------
 let _mouseDown = false, _mouseWired = false;
@@ -180,6 +181,10 @@ function buildCtx() {
     rng: GU.makeRng(0x6CED2A11),
     config: { difficulty: 0.9, pedDensity: 1, persist: true, mode: 'onfoot' },
   };
+  // expose the live sandbox state for debugging / external probes. The combat model
+  // lives HERE (ctx.player.health/armor/money/weapon), not on the host window.ONFOOT —
+  // so a probe of window.ONFOOT alone reads "no health"; window.ONFOOT.gta is the truth.
+  if (typeof window !== 'undefined' && window.ONFOOT) window.ONFOOT.gta = ctx;
   return ctx;
 }
 
@@ -195,8 +200,19 @@ function wireHost() {
 // ============================================================
 // ctx.targets mirrors — peds (shootable: onHit -> onfoot3d.killPed) + vehicles
 // ============================================================
+// combat.js calls onHit(damage, 'player', hitPoint) on the nearest ctx.targets entry,
+// so route the real per-hit damage into the ped's HP (host: hurtPed). Lethal hits drop
+// them (killPed → onKill → cash/crime); sub-lethal hits show a flesh impact puff so the
+// shot visibly connects instead of feeling inert. Falls back to a one-shot kill if the
+// host predates hurtPed.
 function pedOnHit(src) {
-  return function () { try { if (!src.dead && I.killPed) I.killPed(src); } catch (e) {} };
+  return function (dmg) {
+    try {
+      if (src.dead) return;
+      const lethal = I.hurtPed ? I.hurtPed(src, dmg) : (I.killPed ? (I.killPed(src), true) : false);
+      if (!lethal) GTA.bus.emit('fx:impact', { pos: { x: src.pos.x, y: 1.15, z: src.pos.z }, kind: 'flesh', scale: 0.7 });
+    } catch (e) {}
+  };
 }
 function buildMirrors() {
   pedMirrors.length = 0; vehMirrors.length = 0;
@@ -387,8 +403,8 @@ function updateWeaponPickups(dt) {
       wp.taken = true; wp.grp.visible = false;
       const c = ctx.systems.combat && ctx.systems.combat.api;
       if (c) { c.giveWeapon(wp.weaponId, true); }
-      const name = wp.weaponId === 'ak47' ? 'an AK-47' : wp.weaponId === 'smg' ? 'an SMG' : wp.weaponId === 'shotgun' ? 'a shotgun' : 'a weapon';
-      GTA.bus.emit('toast', { html: `Picked up <b>${name}</b>. <b>Tab</b> / <b>1-5</b> to switch.`, ms: 3500 });
+      const name = wp.weaponId === 'ak47' ? 'an AK-47' : wp.weaponId === 'smg' ? 'an SMG' : wp.weaponId === 'shotgun' ? 'a shotgun' : wp.weaponId === 'grenade' ? 'grenades' : 'a weapon';
+      GTA.bus.emit('toast', { html: `Picked up <b>${name}</b>. <b>Tab</b> / <b>1-6</b> to switch.`, ms: 3500 });
     }
   }
 }
@@ -398,6 +414,9 @@ function placePickups() {
   spawnWeaponPickup('smg', -14, 10);
   spawnWeaponPickup('shotgun', 16, 14);
   spawnWeaponPickup('ak47', -2, -34);     // near the bank approach
+  spawnWeaponPickup('grenade', -8, -40);  // grenades by the bank — clear the vault guards
+  spawnWeaponPickup('shotgun', 52, -50);  // outer ring, so the bigger map rewards exploring
+  spawnWeaponPickup('smg', -56, 46);      // outer ring (opposite corner)
   // ammo / health / armor crates via economy's pickup manager.
   const drop = (kind, value, x, z) => GTA.bus.emit('spawnPickup', { kind, value, pos: { x, y: 0, z } });
   // health/armor also register a respawn SEED (gta/pickups.js re-drops them on a
@@ -405,8 +424,10 @@ function placePickups() {
   const pk = ctx.systems.pickups && ctx.systems.pickups.api;
   const seed = (kind, value, x, z) => { drop(kind, value, x, z); if (pk) pk.seed(kind, value, x, z); };
   drop('ammo', 90, 6, 6); drop('ammo', 120, -10, -10); drop('ammo', 120, 20, -20); drop('ammo', 90, -22, 18);
-  seed('armor', 100, 4, -8); seed('armor', 50, -18, -4);
+  drop('ammo', 120, 48, 40); drop('ammo', 120, -52, -44);   // outer-ring ammo so the edges aren't empty
+  seed('armor', 100, 4, -8); seed('armor', 50, -18, -4); seed('armor', 50, -48, 52);
   seed('health', 40, 12, 12); seed('health', 40, -8, 20); seed('health', 40, 0, -28);
+  seed('health', 40, 56, -50); seed('health', 40, -44, -54);
 }
 
 // ============================================================
@@ -455,9 +476,11 @@ function onEnter() {
         }).catch((e) => console.warn('[GTA] realism modules unavailable; plain render', e))
           .finally(() => { window.ONFOOT.layerReady = true; });   // release the loader once textures/lighting/post-FX are up (or have failed)
       }
-      // loadout: Smeaglodin starts with a pistol + an AK-47, full health + armor
+      // loadout: Smeaglodin starts with a pistol + an AK-47 + a couple of grenades, full
+      // health + armor. The grenade is fully implemented (throw/cook/blast) — grant it so
+      // it isn't an unreachable weapon; Tab / 1-6 switch, click throws.
       const c = ctx.systems.combat && ctx.systems.combat.api;
-      if (c) { c.giveWeapon('pistol', true); c.giveWeapon('ak47', false); }
+      if (c) { c.giveWeapon('pistol', true); c.giveWeapon('ak47', false); c.giveWeapon('grenade', false); }
       ctx.player.health = ctx.player.maxHealth; ctx.player.armor = 100;
       placePickups();
       // expose the live ambient-traffic list to host-side readers (Lane A/B) as
@@ -481,7 +504,7 @@ function onEnter() {
     active = true;
     document.getElementById('gta-hud')?.classList.remove('hidden');
     document.body.classList.add('gta-active');
-    GTA.bus.emit('toast', { html: 'Heist time. Get to the <b>bank</b> (radar marker), grab the <b>goop</b> from the vault, then <b>escape in a car</b>. Cops will come — fight or flee.<br>You’re carrying a <b>pistol</b> + <b>AK-47</b> — <b>Tab</b>/<b>1-5</b> switch, <b>R</b> reload. <b>Click</b> to look (or <b>Q/E</b> to turn).', ms: 8000 });
+    GTA.bus.emit('toast', { html: 'Heist time. Get to the <b>bank</b> (radar marker), crack the <b>vault</b> and grab the <b>goop</b>, then <b>escape in a car</b>. The vault is guarded and the cops will swarm — fight or flee.<br>You’re carrying a <b>pistol</b> + <b>AK-47</b> + <b>grenades</b> — <b>Tab</b>/<b>1-6</b> switch, <b>R</b> reload. <b>Click</b> to grab the mouse, or just <b>move the cursor</b> / <b>Q-E</b> to aim.', ms: 8000 });
   } catch (e) { console.error('[GTA bridge] onEnter failed; base on-foot mode unaffected', e); }
 }
 
@@ -518,6 +541,12 @@ function onTick(dt) {
     ctx.player.inVehicle = !!driving;
     ctx.player.vehicle = driving ? I.playerVehicle : null;
     ctx.firstPerson = !!I.firstPerson;   // mirror FP state for systems that poll ctx
+    // mirror the combat model back onto the host player object so a console/probe read
+    // of window.ONFOOT.internals.player shows live health/armor (not a false "no health").
+    try { I.player.health = ctx.player.health; I.player.armor = ctx.player.armor; I.player.alive = ctx.player.alive; } catch (e) {}
+    // surface weather changes on the bus (gta/audio.js swells wind + fades in rain hiss).
+    const wx = window.ONFOOT && window.ONFOOT.weather;
+    if (wx && wx !== _lastWeather) { _lastWeather = wx; GTA.bus.emit('world:weather', { kind: wx, intensity: (window.ONFOOT.weatherIntensity || 0) }); }
 
     const pp = I.player.pos;
     if (_lastPx !== null && dt > 0) {

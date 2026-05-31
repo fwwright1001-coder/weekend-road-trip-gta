@@ -36,6 +36,8 @@ const EYE = 1.55;            // head/aim height above feet
 const CAM_DIST = 5.6;        // third-person camera distance
 const MOUSE_SENS = 0.0022;   // pointer-lock look sensitivity
 const TURN_RATE = 2.4;       // Q/E keyboard turn rate (rad/s) — turning works even without pointer lock
+const CURSOR_TURN = 3.0;     // mouse-aim WITHOUT pointer lock: yaw rate (rad/s) at full cursor deflection
+const CURSOR_PITCH = 1.7;    // mouse-aim WITHOUT pointer lock: pitch rate (rad/s) at full cursor deflection
 const PITCH_MIN = -0.95, PITCH_MAX = 0.55;
 const MAX_RANGE = 140;       // bullet reach
 const HIT_R = 1.0;           // how close the aim ray must pass a ped to hit
@@ -46,16 +48,20 @@ const NPC_COUNT = 24;        // crowd size — scaled up for the bigger zoned to
 const BOUND = 84;            // half-size of the walkable town square (7x7 zoned grid)
 const RESPAWN_DELAY = 4.0;   // seconds a downed ped stays before a new one strolls in
 
-// ---- driving (arcade, GTA-ish) ---------------------------------------------
-const CAR_ACCEL = 26;        // throttle accel (units/s^2)
-const CAR_BRAKE = 42;        // braking decel while moving forward
-const CAR_REVERSE_ACCEL = 16;// reverse accel once stopped
-const CAR_MAX_SPEED = 36;    // forward top speed (units/s)
-const CAR_MAX_REVERSE = -12; // reverse top speed
-const CAR_DRAG = 0.6;        // rolling resistance under throttle (per s)
-const CAR_COAST_DRAG = 1.4;  // engine braking when off throttle
-const CAR_HANDBRAKE_DRAG = 4.0; // Space: scrub speed hard
+// ---- driving (arcade, GTA-ish: a 2D velocity vector + lateral grip, so the car
+//      carries momentum and can actually SLIDE/DRIFT — not just a scalar speed) --
+const CAR_ACCEL = 34;        // throttle accel (units/s^2) — punchier off the line
+const CAR_BRAKE = 46;        // braking decel while moving forward
+const CAR_REVERSE_ACCEL = 18;// reverse accel once stopped
+const CAR_MAX_SPEED = 42;    // forward top speed (units/s)
+const CAR_MAX_REVERSE = -14; // reverse top speed
+const CAR_DRAG = 0.35;       // rolling resistance under throttle (per s) — lighter, holds momentum
+const CAR_COAST_DRAG = 0.9;  // engine braking when off throttle
+const CAR_HANDBRAKE_DRAG = 1.1; // Space: only a light longitudinal scrub, so the car keeps SLIDING (not a dead stop)
 const CAR_TURN = 2.3;        // steering rate (rad/s) at full authority
+const CAR_HANDBRAKE_TURN = 1.5; // steering multiplier while handbraking (rotate sharply into a slide)
+const CAR_GRIP = 9.0;        // lateral grip (1/s): how fast sideways slip is killed when gripping (car tracks its nose)
+const CAR_HANDBRAKE_GRIP = 1.6; // lateral grip while handbraking — low, so the rear breaks loose → drift
 const CAR_RADIUS = 1.9;      // collision pad vs buildings
 const CAR_CAM_DIST = 9.5;    // chase-cam distance behind the car
 const CAR_CAM_HEIGHT = 4.6;  // chase-cam height
@@ -182,6 +188,9 @@ let rafId = 0, lastT = 0;
 const keys = new Set();
 const justPressed = new Set();   // edge-pressed keys this frame (for an optional systems layer)
 let locked = false;          // pointer-lock engaged
+let _pointerLockBlocked = false;   // pointer lock was denied (embedded/unfocused) — stop re-requesting; steer by cursor
+let _lockNoticeShown = false;      // the "mouse-look unavailable" toast has been shown once
+let _cursorX = 0, _cursorY = 0, _cursorInside = false;   // last cursor pos in NDC (-1..1) for lock-free mouse-aim
 let yaw = 0, pitch = -0.12;  // camera orientation
 let recoil = 0;              // transient upward kick, decays each frame
 
@@ -1394,10 +1403,12 @@ function spawnPed(rng, atRandomSpot) {
   while (insideBuilding(px, pz, PED_R + 0.5) && tries < 40);
   mesh.position.set(px, 0, pz);
   scene.add(mesh);
+  const baseHp = 30 + r() * 20;   // 30..50 hp: pistol(26)→2, AK(32)→2, SMG(16)→3, shotgun→1, grenade→instant
   const ped = {
     mesh, mats, pos: new THREE.Vector3(px, 0, pz), vel: new THREE.Vector3(),
     target: new THREE.Vector3(px, 0, pz), threat: new THREE.Vector3(px, 0, pz),
     state: 'wander', t: 0, dead: false, fall: 0, walkPhase: r() * 10,
+    hp: baseHp, maxHp: baseHp,   // gunfire now has to actually drop them (gta/combat.js feeds per-hit damage)
     // round-3 behaviour: varied gait, occasional loitering, panic direction
     speedMul: 0.7 + r() * 0.6, loiterT: 2 + r() * 6, scatterDir: r() * Math.PI * 2,
   };
@@ -1506,27 +1517,64 @@ function onKeyUp(e) {
   keys.delete(e.code);
 }
 function tryPointerLock() {
-  // robust request: focus the canvas, request inside the click gesture, and surface
-  // a denial instead of failing silently (Q/E still turn the player either way)
+  // robust request: focus the canvas, request inside the click gesture, and surface a
+  // denial on-screen instead of failing silently. Once denied (sandboxed iframe / no
+  // window focus / WrongDocumentError) we STOP re-requesting — the cursor-aim + Q/E
+  // fallback takes over, so the game stays fully playable without the mouse lock.
+  if (_pointerLockBlocked) return;
   try {
     if (canvas.focus) canvas.focus();
     const p = canvas.requestPointerLock && canvas.requestPointerLock();
-    if (p && typeof p.catch === 'function') p.catch((err) => console.warn('[ONFOOT] pointer lock denied — use Q/E to turn', err));
-  } catch (err) { console.warn('[ONFOOT] pointer lock failed — use Q/E to turn', err); }
+    if (p && typeof p.catch === 'function') p.catch(onPointerLockDenied);
+  } catch (err) { onPointerLockDenied(err); }
+}
+// pointer lock can be refused either as a rejected promise OR a 'pointerlockerror'
+// event (that's how WrongDocumentError surfaces). Both funnel here: block further
+// requests + tell the player how to play without it (once).
+function onPointerLockDenied(err) {
+  _pointerLockBlocked = true;
+  console.warn('[ONFOOT] pointer lock unavailable — aim with the cursor or Q/E to turn', err);
+  if (!_lockNoticeShown) {
+    _lockNoticeShown = true;
+    try { showToast('Mouse-look unavailable here — <b>move the cursor to aim</b>, or <b>Q/E</b> to turn. <b>Click</b> still shoots.'); } catch (e) {}
+  }
 }
 function onMouseDown(e) {
   if (OF.paused) return;                                  // pause/settings overlay is up (Lane B): don't relock or fire
   if (!OF.active || mode !== 'foot') return;             // no shooting from the driver's seat
-  if (!locked) { tryPointerLock(); return; }             // first click grabs the mouse for look; Q/E turn regardless
-  if (e.button === 0) fire();
+  if (!locked && !_pointerLockBlocked) { tryPointerLock(); return; }  // first click grabs the mouse; once denied, fall through
+  if (e.button === 0) fire();                            // no-op under OF.combatOwned (the systems layer fires combat)
 }
 function onMouseMove(e) {
-  if (!OF.active || !locked) return;
-  yaw -= e.movementX * MOUSE_SENS;
-  pitch -= e.movementY * MOUSE_SENS;
-  pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, pitch));
+  if (!OF.active) return;
+  if (locked) {
+    yaw -= e.movementX * MOUSE_SENS;
+    pitch -= e.movementY * MOUSE_SENS;
+    pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, pitch));
+  } else if (canvas) {
+    // no pointer lock: track the cursor in NDC so updateOnFoot can pan toward it
+    const r = canvas.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) {
+      _cursorX = ((e.clientX - r.left) / r.width) * 2 - 1;
+      _cursorY = ((e.clientY - r.top) / r.height) * 2 - 1;
+      _cursorInside = _cursorX >= -1.02 && _cursorX <= 1.02 && _cursorY >= -1.02 && _cursorY <= 1.02;
+    }
+  }
 }
 function onPointerLockChange() { locked = document.pointerLockElement === canvas; }
+// mouse-aim WITHOUT pointer lock: the cursor's offset from screen-centre pans the camera
+// (rate scales past a centre dead-zone), so the game is fully playable embedded/unfocused.
+// Q/E still work alongside this. No-op while pointer-locked (movement deltas drive look).
+function cursorSteer(dt) {
+  if (locked || !_cursorInside) return;
+  const dz = 0.12;
+  const sx = Math.abs(_cursorX), sy = Math.abs(_cursorY);
+  const ax = sx > dz ? Math.min(1, (sx - dz) / (1 - dz)) * Math.sign(_cursorX) : 0;
+  const ay = sy > dz ? Math.min(1, (sy - dz) / (1 - dz)) * Math.sign(_cursorY) : 0;
+  yaw -= ax * CURSOR_TURN * dt;
+  pitch -= ay * CURSOR_PITCH * dt;
+  pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, pitch));
+}
 
 // nearest un-occupied car within maxDist of the player on foot
 function nearestVehicle(maxDist) {
@@ -1592,6 +1640,17 @@ function killPed(p) {
   kills++;
   if (OF.onKill) OF.onKill(p);
   updateHud();
+}
+
+// Apply weapon damage to a ped: drop them if HP hits 0, otherwise survive (the caller
+// shows a non-lethal hit reaction). Returns true if this hit was lethal. This is what
+// makes bullets "matter" and weapon damage differentiate — gta/combat.js routes each
+// hit's damage here through the ctx.targets onHit gateway (bridge: pedOnHit).
+function hurtPed(p, dmg) {
+  if (!p || p.dead || p.state === 'dead') return false;
+  p.hp -= (dmg > 0 ? dmg : 1);
+  if (p.hp <= 0) { killPed(p); return true; }
+  return false;
 }
 
 // ============================================================
@@ -1881,6 +1940,7 @@ function updateOnFoot(dt) {
   // keyboard turn fallback — Q turns left, E turns right; works with or without pointer lock
   if (keys.has('KeyQ')) yaw += TURN_RATE * dt;
   if (keys.has('KeyE')) yaw -= TURN_RATE * dt;
+  cursorSteer(dt);                 // mouse-aim when pointer lock is unavailable (embedded/unfocused)
   // --- player movement relative to camera yaw ---
   // The camera looks toward +_fwd (see camera block below), so forward = +_fwd
   // and screen-right = +_right (matches the camera basis: W into screen, D right).
@@ -2065,40 +2125,59 @@ function ensureViewmodel() {
 // ============================================================
 function updateDriving(dt) {
   const v = playerVehicle;
+  if (!v.vel) v.vel = { x: 0, z: 0 };   // world-XZ velocity vector; v.speed mirrors its FORWARD component
   const throttle = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
   const steer = (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0) - (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0);
   const handbrake = keys.has('Space');
 
-  // longitudinal: throttle, brake, reverse
-  if (throttle > 0) v.speed += CAR_ACCEL * dt;
-  else if (throttle < 0) {
-    if (v.speed > 0.3) v.speed -= CAR_BRAKE * dt;       // brake while rolling forward
-    else v.speed -= CAR_REVERSE_ACCEL * dt;             // then reverse
-  }
-  // resistance: handbrake > engine-braking (coasting) > rolling
-  const drag = handbrake ? CAR_HANDBRAKE_DRAG : (throttle === 0 ? CAR_COAST_DRAG : CAR_DRAG);
-  v.speed -= v.speed * drag * dt;
-  v.speed = Math.max(CAR_MAX_REVERSE, Math.min(CAR_MAX_SPEED, v.speed));
-  if (Math.abs(v.speed) < 0.03) v.speed = 0;
-
-  // steering authority grows with speed and flips in reverse (like real cars)
-  const steerAuth = Math.max(-1, Math.min(1, v.speed / 6));
-  v.heading += steer * CAR_TURN * steerAuth * dt;
-
-  // integrate position along heading; on a hard wall hit, hand off to the dynamic
-  // impact physics (gta/physics.js, via OF.carImpact) for a real momentum crash —
-  // velocity bleed/redirect + knockback + body jolt + crumple + shake/fx events.
-  // Falls back to the old simple speed-bleed when that systems layer isn't loaded.
+  // car basis: forward (nose, +Z at heading 0) + right (driver's side)
   const fx = Math.sin(v.heading), fz = Math.cos(v.heading);
+  const rx = Math.cos(v.heading), rz = -Math.sin(v.heading);
+  // split the current velocity into forward speed (vf) + sideways slip (vl, the drift component)
+  let vf = v.vel.x * fx + v.vel.z * fz;
+  let vl = v.vel.x * rx + v.vel.z * rz;
+
+  // longitudinal: throttle, brake, reverse (acts on the forward component)
+  if (throttle > 0) vf += CAR_ACCEL * dt;
+  else if (throttle < 0) {
+    if (vf > 0.3) vf -= CAR_BRAKE * dt;                 // brake while rolling forward
+    else vf -= CAR_REVERSE_ACCEL * dt;                  // then reverse
+  }
+  // longitudinal resistance: handbrake (light — keep sliding) > engine-braking (coast) > rolling
+  const drag = handbrake ? CAR_HANDBRAKE_DRAG : (throttle === 0 ? CAR_COAST_DRAG : CAR_DRAG);
+  vf -= vf * drag * dt;
+  vf = Math.max(CAR_MAX_REVERSE, Math.min(CAR_MAX_SPEED, vf));
+  if (Math.abs(vf) < 0.03) vf = 0;
+
+  // lateral GRIP: bleed sideways slip toward 0. Full grip → the car tracks its nose;
+  // the handbrake drops grip so the rear breaks loose and the car SLIDES (drift).
+  vl *= Math.exp(-(handbrake ? CAR_HANDBRAKE_GRIP : CAR_GRIP) * dt);
+
+  // steering authority grows with speed and flips in reverse; sharper while handbraking
+  const steerAuth = Math.max(-1, Math.min(1, vf / 6));
+  v.heading += steer * CAR_TURN * (handbrake ? CAR_HANDBRAKE_TURN : 1) * steerAuth * dt;
+
+  // recompose world velocity. NOTE: slip (vl) stays on the OLD right axis — that lag
+  // between where the nose points and where momentum carries is exactly what drifts.
+  v.vel.x = fx * vf + rx * vl;
+  v.vel.z = fz * vf + rz * vl;
+  v.speed = vf;   // compat: chase cam / wheels / HUD / gta/physics.js all read v.speed
+
+  // integrate position along the full velocity vector; on a hard wall hit hand off to
+  // the dynamic impact physics (gta/physics.js via OF.carImpact) for a momentum crash —
+  // velocity bleed/redirect + knockback + body jolt + crumple + shake/fx events.
+  // Falls back to a simple speed-bleed when that systems layer isn't loaded.
   const px = v.pos.x, pz = v.pos.z;
-  const stepX = fx * v.speed * dt, stepZ = fz * v.speed * dt;
+  const stepX = v.vel.x * dt, stepZ = v.vel.z * dt;
   const intendedX = px + stepX, intendedZ = pz + stepZ;
   moveAndCollide(v.pos, stepX, stepZ, CAR_RADIUS);
   const moved = Math.hypot(v.pos.x - px, v.pos.z - pz);
-  const intended = Math.abs(v.speed) * dt;
+  const intended = Math.hypot(stepX, stepZ);
   if (intended > 0.05 && moved < intended * 0.5) {
-    if (OF.carImpact) OF.carImpact(v, { speed: v.speed, dt, dirx: fx, dirz: fz, intended, moved, pushX: v.pos.x - intendedX, pushZ: v.pos.z - intendedZ });
+    if (OF.carImpact) OF.carImpact(v, { speed: vf, dt, dirx: fx, dirz: fz, intended, moved, pushX: v.pos.x - intendedX, pushZ: v.pos.z - intendedZ });
     else v.speed *= 0.25;   // crunched into a building (base behaviour, no systems layer)
+    // a crash kills sideways momentum: re-seat the velocity vector to the (bled/bounced) forward speed
+    v.vel.x = Math.sin(v.heading) * v.speed; v.vel.z = Math.cos(v.heading) * v.speed; vl = 0;
   }
 
   // run over any live ped you plough into at speed
@@ -2109,13 +2188,14 @@ function updateDriving(dt) {
     }
   }
 
-  // apply to the mesh: position, heading, a little body roll, wheel spin + steer
+  // apply to the mesh: position, heading, body roll + lean into a slide, wheel spin + steer
+  const slip = Math.max(-1, Math.min(1, vl / 10));   // -1..1 drift amount for the visual lean / counter-steer
   v.mesh.position.copy(v.pos);
   v.mesh.rotation.y = v.heading;
-  v.mesh.rotation.z = lerpNum(v.mesh.rotation.z, -steer * steerAuth * 0.06, 0.2);
+  v.mesh.rotation.z = lerpNum(v.mesh.rotation.z, -steer * steerAuth * 0.06 - slip * 0.10, 0.2);
   v.mesh.rotation.x = -(v.crashJolt || 0);   // transient nose-pitch from a crash (gta/physics.js)
   for (let i = 0; i < v.wheels.length; i++) v.wheels[i].rotation.x -= v.speed * dt * 0.6;  // roll
-  for (const sp of v.steerPivots) sp.rotation.y = steer * 0.4;                              // front-wheel steer
+  for (const sp of v.steerPivots) sp.rotation.y = steer * 0.4 - slip * 0.3;                 // front wheels: steer + visible opposite-lock in a slide
 
   // chase camera (Lane B sub-block ONLY — physics above is Lane D): a behind-and-
   // above GTA cam. It trails a SMOOTHED heading (so hard steering reads as the camera
@@ -2282,7 +2362,7 @@ function respawnPed(p) {
   p.pos.set(px, 0, pz); p.mesh.position.copy(p.pos);
   p.mesh.rotation.set(0, 0, 0);
   for (const m of p.mats) { m.opacity = 1; m.transparent = false; }
-  p.dead = false; p.state = 'wander'; p.t = 0; pickTarget(p);
+  p.dead = false; p.state = 'wander'; p.t = 0; p.hp = (p.maxHp != null ? p.maxHp : 40); pickTarget(p);
 }
 
 // make nearby peds flee when the player shoots (gunfire originates at the player)
@@ -2413,7 +2493,7 @@ OF.internals = {
   get firstPerson() { return OF.firstPerson; },
   get playerVehicle() { return playerVehicle; },
   bound: BOUND,
-  resolveCollision, insideBuilding, spawnVehicle, nearestVehicle, enterVehicle, exitVehicle, killPed, startleNearby, justPressed,
+  resolveCollision, insideBuilding, spawnVehicle, nearestVehicle, enterVehicle, exitVehicle, killPed, hurtPed, startleNearby, justPressed,
   // panic a radius of peds from a point (bridge calls this on explosions); mode: 'flee'|'scatter'|'cower'
   panicPeds: (x, z, r, mode) => panicArea(x, z, r, mode || 'scatter'),
 };
@@ -2436,6 +2516,7 @@ window.addEventListener('keyup', onKeyUp, true);
 window.addEventListener('mousedown', onMouseDown, true);
 window.addEventListener('mousemove', onMouseMove, false);
 document.addEventListener('pointerlockchange', onPointerLockChange, false);
+document.addEventListener('pointerlockerror', () => onPointerLockDenied('pointerlockerror'), false);
 window.addEventListener('resize', () => { if (initialized && OF.active) resize(); });
 
 // Shareable playtest entry: opening the page with #gta (or ?gta / #playtest)

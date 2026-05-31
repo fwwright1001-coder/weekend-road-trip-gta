@@ -37,8 +37,9 @@ let _musicVol = 0.45, _ambVol = 0.6;
 let _noiseBuf = null;
 
 // ambient bed nodes (kept so we can stop/restart cleanly)
-let _amb = null;                // { traffic, wind, windLfo, nodes:[...] }
+let _amb = null;                // { nodes:[...], wind, windBase, lfoG, lfoBase, rain }
 let _nextSiren = 0;             // ac-time of the next distant siren
+let _weather = 'clear';         // last weather kind from 'world:weather' (clear|rain|fog)
 
 // radio scheduler (lookahead step sequencer)
 let _station = 0;               // index into STATIONS (0 = OFF)
@@ -97,13 +98,18 @@ function startAmbient() {
     const lfoG = _ac.createGain(); lfoG.gain.value = 0.045;
     lfo.connect(lfoG).connect(wg.gain); wind.connect(wbp).connect(wg).connect(_ambGain); wind.start(); lfo.start();
     nodes.push(traf, hum, wind, lfo);
-    _amb = { nodes };
+    // keep the wind gain (and its dry baseline) so weather can swell it; rain is a
+    // separate layer started on demand by setWeather('rain').
+    _amb = { nodes, wind: wg, windBase: 0.05, lfoG, lfoBase: 0.045, rain: null };
     _nextSiren = _ac.currentTime + 12 + Math.random() * 16;
+    // re-apply any pending weather state captured before the bed existed
+    if (_weather && _weather !== 'clear') applyWeather(_weather);
   } catch (e) { /* optional */ }
 }
 function stopAmbient() {
   try {
     if (!_amb) return;
+    if (_amb.rain && _amb.rain.src) { try { _amb.rain.src.stop(); } catch (e) {} }
     for (const n of _amb.nodes) { try { n.stop(); } catch (e) {} }
     _amb = null;
   } catch (e) { /* optional */ }
@@ -126,6 +132,55 @@ function playSiren(t) {
     g.gain.setValueAtTime(0.05, t + dur - 0.5);
     g.gain.linearRampToValueAtTime(0.0001, t + dur);
     o.start(t); o.stop(t + dur + 0.05);
+  } catch (e) { /* optional */ }
+}
+
+// ============================================================
+// WEATHER — scale the wind bed + add a light rain-hiss layer when it rains.
+// Driven by the 'world:weather' bus event {kind:'clear'|'rain'|'fog'}; dormant
+// and harmless until the host emits it. Headless-safe (all WebAudio behind
+// audioReady()). Idempotent: re-applying the same kind is a no-op on the layers.
+// ============================================================
+function setWeather(kind) {
+  _weather = (kind === 'rain' || kind === 'fog') ? kind : 'clear';
+  applyWeather(_weather);
+}
+function applyWeather(kind) {
+  try {
+    if (!audioReady() || !_amb) return;   // applied later by startAmbient() once the bed exists
+    const now = _ac.currentTime;
+    // wind picks up in rain, sits a touch heavier in fog, calm when clear
+    const windScale = kind === 'rain' ? 2.2 : kind === 'fog' ? 1.4 : 1;
+    if (_amb.wind && _amb.wind.gain) {
+      _amb.wind.gain.cancelScheduledValues(now);
+      _amb.wind.gain.linearRampToValueAtTime(_amb.windBase * windScale, now + 2);
+    }
+    if (_amb.lfoG && _amb.lfoG.gain) {     // gustier swell in rain
+      _amb.lfoG.gain.cancelScheduledValues(now);
+      _amb.lfoG.gain.linearRampToValueAtTime(_amb.lfoBase * (kind === 'rain' ? 1.6 : 1), now + 2);
+    }
+    if (kind === 'rain') startRain(); else stopRain();
+  } catch (e) { /* never throw out of an event handler */ }
+}
+// a soft rain hiss: highpassed looped noise faded in under the bed
+function startRain() {
+  try {
+    if (!audioReady() || !_amb || _amb.rain) return;
+    const src = _ac.createBufferSource(); src.buffer = noiseBuffer(); src.loop = true; src.playbackRate.value = 1.0;
+    const hp = _ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1600; hp.Q.value = 0.5;
+    const lp = _ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 8000;
+    const g = _ac.createGain(); g.gain.value = 0.0001;
+    g.gain.linearRampToValueAtTime(0.07, _ac.currentTime + 2.5);   // fade the hiss in
+    src.connect(hp).connect(lp).connect(g).connect(_ambGain); src.start();
+    _amb.rain = { src, gain: g };
+  } catch (e) { /* optional */ }
+}
+function stopRain() {
+  try {
+    if (!_amb || !_amb.rain) return;
+    const r = _amb.rain; _amb.rain = null;
+    try { r.gain.gain.linearRampToValueAtTime(0.0001, _ac.currentTime + 1.2); } catch (e) {}
+    try { r.src.stop(_ac.currentTime + 1.4); } catch (e) {}
   } catch (e) { /* optional */ }
 }
 
@@ -286,6 +341,9 @@ function init(ctx) {
       bus.on('wanted:changed', (p) => {
         try { if (p && p.level > (p.prev || 0) && _ac && _amb) _nextSiren = Math.min(_nextSiren, _ac.currentTime + 2 + Math.random() * 3); } catch (e) {}
       });
+      // weather: host (Lane C) emits 'world:weather' {kind:'clear'|'rain'|'fog'};
+      // scale the wind bed + fade a light rain hiss in/out. Dormant until emitted.
+      bus.on('world:weather', (p) => { try { setWeather(p && p.kind); } catch (e) {} });
     }
   } catch (e) { console.warn('[AUDIO] init failed (non-fatal)', e); }
 }
@@ -314,7 +372,7 @@ function reset(ctx) {
 const audioSystem = {
   name: 'audio',
   init, update, reset,
-  api: { cycleStation, setStation, station, stations, setMusicVolume, setAmbientVolume, setMuted, ambient, reset },
+  api: { cycleStation, setStation, station, stations, setMusicVolume, setAmbientVolume, setMuted, ambient, setWeather, reset },
 };
 try { GTA.register(audioSystem); } catch (e) { console.warn('[AUDIO] GTA.register failed', e); }
 function install(ctx, gta) { try { (gta || GTA).register(audioSystem); } catch (e) {} if (ctx) init(ctx); return audioSystem; }
