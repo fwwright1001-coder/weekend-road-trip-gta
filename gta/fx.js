@@ -52,6 +52,9 @@ const SURFACES = {
 };
 // slot (1..5) -> weapon id, so weapon:changed without an explicit id still maps
 const SLOT_WEAPON = { 1: 'fists', 2: 'pistol', 3: 'ak47', 4: 'smg', 5: 'shotgun' };
+// per-weapon recoil kick fed to the host camera (window.ONFOOT.kick) on each shot,
+// so combat-owned firing kicks the third-person AND first-person camera.
+const KICK = { fists: 0, pistol: 0.03, ak47: 0.05, smg: 0.025, shotgun: 0.09 };
 
 // ---- module state ----------------------------------------------------------
 let THREE = null;
@@ -64,6 +67,15 @@ let _curWeapon = 'pistol';    // tracked from weapon:changed, for gun report aud
 
 // two pooled Points systems — sparks (additive) and smoke/dust/blood (alpha)
 let _spark = null, _smoke = null;
+
+// brass casing ejection — a small pool of spinning low-poly meshes that arc +
+// bounce on the ground (real geometry, not points, so the spin reads).
+const CASING_CAP = 28;
+let _casings = null;          // { items: [{mesh,mat,vx,vy,vz,ax,ay,az,life,maxLife,bounced}], head }
+// latches: if Lane A emits its precise fx:casing/fx:muzzle, stop deriving our own
+// (off the crime{gunfire} event) so we never double up.
+let _explicitCasing = false, _explicitMuzzle = false;
+let _tmpVec = null;           // lazy scratch Vector3 for muzzle world position
 
 // footstep pacing
 let _lastFoot = null;         // {x,z} player pos at last footstep sample
@@ -307,6 +319,115 @@ function stepSystem(sys, dt) {
 }
 
 // ============================================================
+// BRASS CASINGS — pooled spinning meshes (driven by fx:casing from Lane A)
+// ============================================================
+function buildCasings() {
+  if (_casings || _headless || !THREE || !_scene) return;
+  try {
+    const geo = new THREE.CylinderGeometry(0.013, 0.013, 0.05, 6);
+    const items = [];
+    for (let i = 0; i < CASING_CAP; i++) {
+      const mat = new THREE.MeshStandardMaterial({ color: 0xcaa53a, metalness: 0.9, roughness: 0.35, transparent: true, opacity: 1 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = false; mesh.visible = false; mesh.renderOrder = 4;
+      _scene.add(mesh);
+      items.push({ mesh, mat, vx: 0, vy: 0, vz: 0, ax: 0, ay: 0, az: 0, life: 0, maxLife: 1, bounced: 0 });
+    }
+    _casings = { items, head: 0, geo };
+  } catch (e) { _casings = null; }
+}
+
+function spawnCasing(pos, dir, weaponId) {
+  try {
+    if (!_casings || !pos || pos.x == null || pos.z == null) return;
+    const c = _casings.items[_casings.head];
+    _casings.head = (_casings.head + 1) % _casings.items.length;
+    // Lane A sends `dir` = the shooter's unit RIGHT vector (horizontal): brass flies
+    // out the side port along it, + up, with a little scatter.
+    let rx = dir ? dir.x : 1, rz = dir ? dir.z : 0;
+    const rl = Math.hypot(rx, rz) || 1; rx /= rl; rz /= rl;
+    const sp = 1.6 + Math.random() * 1.2;
+    c.mesh.position.set(pos.x + rx * 0.06, (pos.y != null ? pos.y : 1.2), pos.z + rz * 0.06);
+    c.mesh.rotation.set(Math.random() * 6.28, Math.random() * 6.28, Math.random() * 6.28);
+    c.vx = rx * sp + (Math.random() * 2 - 1) * 0.45;
+    c.vz = rz * sp + (Math.random() * 2 - 1) * 0.45;
+    c.vy = 1.8 + Math.random() * 1.0;
+    c.ax = (Math.random() * 2 - 1) * 18; c.ay = (Math.random() * 2 - 1) * 18; c.az = (Math.random() * 2 - 1) * 18;
+    c.life = 1.5 + Math.random() * 0.5; c.maxLife = c.life; c.bounced = 0;
+    c.mat.opacity = 1; c.mesh.visible = true;
+    casingPing(0.5);                                       // faint tink as it leaves the gun
+  } catch (e) { /* optional */ }
+}
+
+function stepCasings(dt) {
+  if (!_casings) return;
+  for (const c of _casings.items) {
+    if (c.life <= 0) continue;
+    c.life -= dt;
+    if (c.life <= 0) { c.mesh.visible = false; continue; }
+    c.vy -= 18 * dt;                                       // gravity
+    const m = c.mesh.position;
+    m.x += c.vx * dt; m.y += c.vy * dt; m.z += c.vz * dt;
+    c.mesh.rotation.x += c.ax * dt; c.mesh.rotation.y += c.ay * dt; c.mesh.rotation.z += c.az * dt;
+    if (m.y <= 0.025) {                                    // ground bounce
+      m.y = 0.025;
+      if (c.vy < -0.4 && c.bounced < 2) { c.vy = -c.vy * 0.38; c.vx *= 0.6; c.vz *= 0.6; c.ax *= 0.5; c.ay *= 0.5; c.az *= 0.5; c.bounced++; casingPing(0.85); }
+      else { c.vy = 0; c.vx *= 0.7; c.vz *= 0.7; c.ax *= 0.7; c.ay *= 0.7; c.az *= 0.7; }   // settle: spin winds down too
+    }
+    const f = c.life / c.maxLife;
+    if (f < 0.3) c.mat.opacity = Math.max(0, f / 0.3);     // fade out at end of life
+  }
+}
+
+function casingPing(gain) {
+  try { if (audioReady()) tone(_ac.currentTime, 'triangle', 2600 + Math.random() * 600, 1400, 0.04, 0.05 * (gain || 1)); }
+  catch (e) { /* optional */ }
+}
+
+// muzzle sparks — a few bright forward specks to sit under combat's tracer/flash
+function muzzleSparks(pos, dir) {
+  try {
+    if (!_particlesOk || !_spark || !pos || pos.x == null) return;
+    const dx = dir ? dir.x : 0, dy = dir ? dir.y : 0, dz = dir ? dir.z : 1;
+    const c = new THREE.Color(0xffe08a);
+    for (let i = 0; i < 6; i++) {
+      const sp = 3 + Math.random() * 5;
+      emit(_spark, pos.x, pos.y != null ? pos.y : 1.2, pos.z,
+        dx * sp + (Math.random() * 2 - 1) * 1.5, dy * sp + (Math.random() * 2 - 1) * 1.5 + 0.5, dz * sp + (Math.random() * 2 - 1) * 1.5,
+        0.05 + Math.random() * 0.05, 0.10 + Math.random() * 0.08,
+        c.r, c.g, c.b, 2.5, PGRAV * 0.3);
+    }
+  } catch (e) { /* optional */ }
+}
+
+// Derive a casing + muzzle burst from the host on each shot. The brief expects
+// Lane A to emit precise fx:casing/fx:muzzle, but no producer exists yet — so we
+// fall back to the always-present crime{gunfire} event, reading the muzzle world
+// position + the shooter's RIGHT vector from window.ONFOOT.internals. If A's
+// precise emit ever lands, the latches below disable this so we never double up.
+function deriveShotFx() {
+  try {
+    if (_curWeapon === 'fists') return;
+    const I = (typeof window !== 'undefined' && window.ONFOOT && window.ONFOOT.internals) || null;
+    if (!I || !THREE) return;
+    const yaw = I.yaw || 0;
+    const right = { x: -Math.cos(yaw), y: 0, z: Math.sin(yaw) };       // shooter right (onfoot3d basis)
+    const fwd = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) };          // shooter forward (horizontal)
+    let mx, my, mz;
+    const muz = I.player && I.player.mesh && I.player.mesh.userData && I.player.mesh.userData.muzzle;
+    if (muz && muz.getWorldPosition) {
+      if (!_tmpVec) _tmpVec = new THREE.Vector3();
+      muz.getWorldPosition(_tmpVec); mx = _tmpVec.x; my = _tmpVec.y; mz = _tmpVec.z;
+    } else if (I.player && I.player.pos) {
+      const p = I.player.pos; mx = p.x + fwd.x * 0.4; my = p.y + 1.2; mz = p.z + fwd.z * 0.4;
+    } else return;
+    const muzPos = { x: mx, y: my, z: mz };
+    if (!_explicitCasing) spawnCasing(muzPos, right, _curWeapon);
+    if (!_explicitMuzzle) { muzzleSmoke(muzPos); muzzleSparks(muzPos, fwd); }
+  } catch (e) { /* optional */ }
+}
+
+// ============================================================
 // PUBLIC: SPAWNERS  (no-op until particles are built)
 // ============================================================
 function spawnImpact(pos, opts) {
@@ -445,12 +566,21 @@ function resolveHandles(ctx) {
   _camera = (ctx && ctx.camera) || (I && I.camera) || _camera;
 }
 
+// the live player position, for player-centred FX (ctx first, host internals fallback)
+function playerPos() {
+  const pl = _ctx && _ctx.player;
+  if (pl && pl.pos && pl.pos.x != null) return pl.pos;
+  const I = (typeof window !== 'undefined' && window.ONFOOT && window.ONFOOT.internals) || null;
+  return (I && I.player && I.player.pos) ? I.player.pos : null;
+}
+
 function init(ctx) {
   try {
     _ctx = ctx || _ctx;
     _headless = !!(ctx && ctx.headless) || typeof document === 'undefined';
     resolveHandles(ctx);
     buildParticles();
+    buildCasings();
     subscribe(ctx);
     if (!_headless) ambient(true);   // start the low city bed (resumes on first gesture)
   } catch (e) { console.warn('[FX] init failed (non-fatal)', e); }
@@ -464,14 +594,28 @@ function subscribe(ctx) {
     _subscribed = true;
     // feedback we get for free from combat / police / the bridge
     bus.on('shake', (p) => shake((p && p.amount) || 0));
-    bus.on('playerHurt', (p) => { shake(0.25); flash({ intensity: 0.3 + Math.min(0.3, ((p && p.amount) || 0) / 60) }); });
+    // PLAYER HIT — red vignette + a few world blood specks at the player + a kick
+    bus.on('playerHurt', (p) => {
+      const amt = (p && p.amount) || 0;
+      shake(0.3 + Math.min(0.5, amt / 40));
+      flash({ color: '200,16,16', intensity: 0.38 + Math.min(0.34, amt / 50) });
+      const pp = playerPos();
+      if (pp) spawnBlood({ x: pp.x, y: 1.2, z: pp.z }, { scale: 0.8 });
+    });
     bus.on('playerRespawn', () => reset(_ctx));
     bus.on('weapon:changed', (p) => {
       if (!p) return;
       const w = p.weapon;
       _curWeapon = (w && (w.id || w.weaponId)) || SLOT_WEAPON[p.slot] || _curWeapon;
     });
-    bus.on('crime', (p) => { if (p && p.kind === 'gunfire') gunReport(_curWeapon); });   // per-shot report
+    bus.on('crime', (p) => {                                                               // per-shot report + camera kick + casing/muzzle
+      if (!p || p.kind !== 'gunfire') return;
+      gunReport(_curWeapon);
+      if (typeof window !== 'undefined' && window.ONFOOT && typeof window.ONFOOT.kick === 'function') {
+        window.ONFOOT.kick(KICK[_curWeapon] != null ? KICK[_curWeapon] : 0.03);
+      }
+      deriveShotFx();   // brass + muzzle off the always-present firing event (unless A emits precise ones)
+    });
     bus.on('entityKilled', (p) => {                                                       // a kill → blood (ped/cop) or sparks (vehicle)
       if (!p || !p.pos) return;
       // peers emit kinds beyond the core catalog (police.js emits kind:'vehicle' for a
@@ -479,9 +623,18 @@ function subscribe(ctx) {
       if (p.kind === 'ped' || p.kind === 'cop') spawnImpact(p.pos, { kind: 'flesh', audio: false });
       else if (p.kind === 'vehicle') spawnImpact(p.pos, { kind: 'metal', scale: 1.5, audio: false });
     });
-    // optional precise-point events Lane A emits where it knows the exact hit
-    bus.on('fx:impact', (p) => { if (p && p.pos) spawnImpact(p.pos, { kind: p.kind || 'world', normal: p.normal, scale: p.scale }); });
-    bus.on('fx:muzzle', (p) => { if (p && p.pos) muzzleSmoke(p.pos); });
+    // optional precise-point events Lane A emits where it knows the exact point
+    bus.on('fx:impact', (p) => { if (p && p.pos) spawnImpact(p.pos, { kind: p.kind || p.surface || 'world', normal: p.normal, scale: p.scale }); });
+    bus.on('fx:muzzle', (p) => { _explicitMuzzle = true; if (p && p.pos) { muzzleSmoke(p.pos); muzzleSparks(p.pos, p.dir); } });
+    bus.on('fx:casing', (p) => { _explicitCasing = true; if (p && p.pos) spawnCasing(p.pos, p.dir, p.weaponId); });   // precise brass eject (Lane A)
+    bus.on('fx:crash', (p) => {                                                                // car-vs-building (Lane D)
+      // D emits fx:impact (metal sparks) AND fx:crash for one crash, so fx:crash adds
+      // ONLY the crumple extras — a burst of dust + the heavy shake — not a 2nd impact.
+      if (!p || !p.pos) return;
+      const sev = p.severity != null ? p.severity : 1;
+      skidDust(p.pos, {}); skidDust(p.pos, {});
+      shake(Math.min(1.4, (Math.abs(p.speed || 0) / 22) + sev * 0.3));
+    });
     bus.on('fx:explosion', (p) => { if (p && p.pos) { spawnImpact(p.pos, { kind: 'metal', scale: 3 }); shake(1.0); } });
     bus.on('fx:spawn', (p) => { if (p && p.pos) spawnImpact(p.pos, { kind: p.kind || 'world', scale: p.scale }); });
     bus.on('pickup', () => uiClick());
@@ -492,9 +645,10 @@ function update(dt, ctx) {
   try {
     if (ctx) _ctx = ctx;
     if (!dt || dt < 0) dt = 0.016; else if (dt > 0.05) dt = 0.05;
-    if (!_built) { resolveHandles(_ctx); buildParticles(); }   // lazy attach if the scene appeared late
-    else { _camera = (_ctx && _ctx.camera) || _camera; }       // keep the camera ref fresh
+    if (!_built) { resolveHandles(_ctx); buildParticles(); buildCasings(); }   // lazy attach if the scene appeared late
+    else { _camera = (_ctx && _ctx.camera) || _camera; }                       // keep the camera ref fresh
     if (_particlesOk) { stepSystem(_spark, dt); stepSystem(_smoke, dt); }
+    stepCasings(dt);
     autoFootsteps(dt);
     applyShake(dt);
   } catch (e) { /* never throw out of the frame loop */ }
@@ -529,6 +683,7 @@ function reset(ctx) {
       for (let i = 0; i < sys.cap; i++) { sys.life[i] = 0; sys.aAlpha.array[i] = 0; sys.aSize.array[i] = 0; }
       sys.aAlpha.needsUpdate = true; sys.aSize.needsUpdate = true;
     }
+    if (_casings) for (const c of _casings.items) { c.life = 0; c.mesh.visible = false; }
     if (_vignette) _vignette.style.opacity = '0';
   } catch (e) { /* optional */ }
 }
@@ -540,7 +695,7 @@ const fxSystem = {
   name: 'fx',
   init, update, reset,
   api: {
-    spawnImpact, spawnBlood, skidDust, muzzleSmoke,
+    spawnImpact, spawnBlood, skidDust, muzzleSmoke, muzzleSparks, spawnCasing,
     shake, flash, gunReport, footstep, ambient, uiClick, impactThud,
     setMuted, setVolume, reset,
   },

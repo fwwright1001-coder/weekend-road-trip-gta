@@ -76,11 +76,37 @@ const CAM = {
   recoilDecay: 5.2,  // how fast the firing kick settles (units/s)
   recoilLift: 1.7,   // camera rise per unit of recoil
   recoilAim: 1.0,    // look-target rise per unit of recoil
+  // --- driving chase cam (behind + above, GTA-style) ---
+  driveDist: 8.5,        // base distance trailing the car
+  driveDistSpeed: 4.5,   // extra pull-back blended in at top speed
+  driveHeight: 3.4,      // base height above the car
+  driveHeightSpeed: 1.0, // extra height at top speed
+  driveLook: 1.35,       // look-target height above the car
+  driveAhead: 6.0,       // look-ahead distance along the car's heading
+  driveYawTau: 0.22,     // how fast the cam swings in behind a turning car (s)
+  // --- first-person (Payday-2 feel) ---
+  fpFov: 75,             // hipfire FOV in first person
+  fpFovAim: 55,          // ADS FOV
+  fpAdsTau: 0.075,       // aim in/out easing (s)
+  fpBob: 0.05,           // head-bob amplitude (m) at full run
+  fpBobFreq: 8.5,        // bob cycles per unit distance walked
+  fpSway: 0.06,          // viewmodel sway from look movement (rad)
+  fpSwayTau: 0.10,       // sway settle (s)
+  fpRecoilPitch: 0.05,   // FP camera pitch kick per unit of recoil
 };
 let _camInit = false;                     // seed the smoothed position on first frame / after mode change
 const _camPos = new THREE.Vector3();      // smoothed camera position (on-foot)
 let _camDist = CAM_DIST;                  // smoothed third-person distance (wall pull-in + aim eased)
 let _curFov = CAM.fovBase;                // smoothed FOV
+const _driveFwd = new THREE.Vector3(0, 0, 1);   // smoothed chase-cam trail direction (eases behind a turn)
+let _driveInit = false;                   // seed the chase cam on the first drive frame
+// first-person viewmodel + feel state (Lane B) — built lazily on first FP frame
+let _vmRoot = null, _vmHolder = null, _vmWeaponId = null;
+let _fpAds = 0;                           // 0 hip .. 1 ADS (smoothed)
+let _fpBobPhase = 0;                      // advances with distance walked
+let _fpSwayX = 0, _fpSwayY = 0;           // smoothed look-sway
+let _fpPrevYaw = null, _fpPrevPitch = 0;  // for sway delta
+let _fpWasActive = false;                 // detect TP<->FP transitions to seed cleanly
 if (typeof window !== 'undefined') window.ONFOOT_CAM = CAM;
 // frame-rate-independent smoothing factor for a given time-constant
 function camDamp(tau, dt) { return 1 - Math.exp(-dt / Math.max(0.0001, tau)); }
@@ -88,6 +114,8 @@ function camDamp(tau, dt) { return 1 - Math.exp(-dt / Math.max(0.0001, tau)); }
 // the bridge) can set on right-mouse; defaults false so on-foot behaviour is
 // unchanged when nothing sets it.
 function isAiming() { return typeof window !== 'undefined' && !!(window.ONFOOT && window.ONFOOT.aiming); }
+// first-person toggle (V) + window.ONFOOT.firstPerson are owned by Lane D; Lane B only READS the flag here.
+function isFirstPerson() { return !!OF.firstPerson; }
 const RUN_OVER_SPEED = 5;    // min speed to knock down a ped you drive into
 
 // ---- public handle ---------------------------------------------------------
@@ -100,6 +128,12 @@ const OF = {
   unlocked: () => localStorage.getItem('wrt.onfoot.unlocked') === 'true',
 };
 window.ONFOOT = OF;
+// Lane B additions OUTSIDE the OF literal, so Lane D's own literal edits (D owns the
+// `firstPerson` flag + the V toggle plumbing) can't merge-conflict with Lane B's:
+//   * firstPerson — declared/owned by Lane D; Lane B only READS window.ONFOOT.firstPerson.
+//   * kick(amt) — firing-recoil hook: combat owns firing, so gta/fx.js calls it each shot
+//     to kick the third-person AND first-person camera. (recoil is initialised below.)
+OF.kick = function (amt) { recoil += (amt || 0); };
 
 // ---- module state ----------------------------------------------------------
 let scene, camera, renderer, canvas;
@@ -1416,6 +1450,8 @@ function exit() {
   if (canvas) canvas.classList.add('hidden');
   if (hudEl) hudEl.classList.add('hidden');
   if (crosshairEl) crosshairEl.classList.add('hidden');
+  if (typeof document !== 'undefined') document.body.classList.remove('gta-fp');   // clear Lane B's FP body state on teardown
+  _fpWasActive = false;
   // restore the driving view exactly as it was
   const g = document.getElementById('game');
   const g3 = document.getElementById('game3d');
@@ -1508,35 +1544,143 @@ function updateOnFoot(dt) {
   if (player.reloadT > 0) { player.reloadT -= dt; if (player.reloadT <= 0) { player.ammo = AMMO_MAX; updateHud(); } }
   if (player.fireT > 0) player.fireT -= dt;
 
-  // --- camera: damped third-person orbit behind the player ---
-  // Look direction stays LIVE off the mouse (aim feels crisp); only the camera's
-  // position + distance ease toward their targets, which is what reads as "smooth".
+  // --- camera ---
+  // Look direction stays LIVE off the mouse (aim feels crisp). Reset the chase-cam
+  // seed so re-entering a car eases in cleanly, then branch: first-person or the
+  // damped third-person orbit. (All of this is Lane B's camera region.)
+  _driveInit = false;
   const aiming = isAiming();
-  const running = !aiming && _vmag > 1.0 && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
+  const fp = isFirstPerson();
+  if (fp !== _fpWasActive) {                                           // on a TP<->FP switch (deduped)
+    _camInit = false;                                                 // re-seed the orbit cam after FP→TP (no swoop)
+    _fpWasActive = fp;
+    if (typeof document !== 'undefined') document.body.classList.toggle('gta-fp', fp);
+  }
+  if (player.mesh) player.mesh.visible = !fp;                          // hide the body in FP (its muzzle still tracks for combat)
   const cpz = Math.cos(pitch);
   _dir.set(Math.sin(yaw) * cpz, Math.sin(pitch), Math.cos(yaw) * cpz);
-  const head = _v.copy(player.pos).setY(EYE);
-  // desired distance: pull over-the-shoulder when aiming, otherwise the orbit
-  // distance; then ease off any wall the orbit point would clip into.
-  let wantDist = aiming ? CAM.aimDist : CAM_DIST;
-  for (let s = 0; s < 6; s++) {
-    if (!insideBuilding(head.x - _dir.x * wantDist, head.z - _dir.z * wantDist, 0.4)) break;
-    wantDist -= 0.8; if (wantDist < 1.2) { wantDist = 1.2; break; }
+  if (fp) {
+    updateFirstPerson(dt, _vmag, aiming);
+  } else {
+    if (_vmRoot) _vmRoot.visible = false;                             // no viewmodel in third person
+    const running = !aiming && _vmag > 1.0 && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
+    const head = _v.copy(player.pos).setY(EYE);
+    // desired distance: pull over-the-shoulder when aiming, else the orbit distance;
+    // then ease off any wall the orbit point would clip into.
+    let wantDist = aiming ? CAM.aimDist : CAM_DIST;
+    for (let s = 0; s < 6; s++) {
+      if (!insideBuilding(head.x - _dir.x * wantDist, head.z - _dir.z * wantDist, 0.4)) break;
+      wantDist -= 0.8; if (wantDist < 1.2) { wantDist = 1.2; break; }
+    }
+    if (!_camInit) _camDist = wantDist;                               // seed distance (no first-frame swoop)
+    _camDist += (wantDist - _camDist) * camDamp(CAM.distTau, dt);     // SMOOTH distance → walls no longer pop
+    const desiredCam = _v2.copy(head).addScaledVector(_dir, -_camDist);
+    desiredCam.y += 0.4 + recoil * CAM.recoilLift;
+    if (desiredCam.y < 0.6) desiredCam.y = 0.6;
+    if (!_camInit) { _camPos.copy(desiredCam); _camInit = true; }      // seed on first frame / after mode change
+    _camPos.lerp(desiredCam, camDamp(CAM.followTau, dt));
+    camera.position.copy(_camPos);
+    const wantFov = aiming ? CAM.fovAim : (running ? CAM.fovRun : CAM.fovBase);
+    _curFov += (wantFov - _curFov) * camDamp(CAM.fovTau, dt);
+    if (Math.abs(camera.fov - _curFov) > 0.02) { camera.fov = _curFov; camera.updateProjectionMatrix(); }
+    camera.lookAt(head.x + _dir.x, head.y + _dir.y + recoil * CAM.recoilAim, head.z + _dir.z);
   }
-  if (!_camInit) _camDist = wantDist;                                 // seed distance (no first-frame swoop)
-  _camDist += (wantDist - _camDist) * camDamp(CAM.distTau, dt);       // SMOOTH distance → walls no longer pop
-  const desiredCam = _v2.copy(head).addScaledVector(_dir, -_camDist);
-  desiredCam.y += 0.4 + recoil * CAM.recoilLift;
-  if (desiredCam.y < 0.6) desiredCam.y = 0.6;
-  if (!_camInit) { _camPos.copy(desiredCam); _camInit = true; }        // seed on first frame / after mode change (no swoop)
-  _camPos.lerp(desiredCam, camDamp(CAM.followTau, dt));
-  camera.position.copy(_camPos);
-  // FOV: base on foot, a touch wider while sprinting (speed), tighter while aiming (zoom wins)
-  const wantFov = aiming ? CAM.fovAim : (running ? CAM.fovRun : CAM.fovBase);
+  recoil = Math.max(0, recoil - dt * CAM.recoilDecay);                 // settle the firing kick (both views)
+}
+
+// ============================================================
+// FIRST-PERSON (Payday-2 feel): eye at the head, weapon viewmodel in view,
+// tight FOV, head-bob, look-sway, ADS zoom, recoil pitch kick. Lane B-owned;
+// the systems layer just sets/reads window.ONFOOT.firstPerson (toggle: V).
+// ============================================================
+function updateFirstPerson(dt, vmag, aiming) {
+  // ADS blend (0 hip .. 1 aim)
+  _fpAds += ((aiming ? 1 : 0) - _fpAds) * camDamp(CAM.fpAdsTau, dt);
+  const grounded = player.grounded !== false;
+  const speedFrac = Math.min(1, vmag / RUN);
+  if (grounded && vmag > 0.4) _fpBobPhase += vmag * dt * CAM.fpBobFreq;   // bob advances with distance walked
+  const bobAmt = CAM.fpBob * speedFrac * (1 - 0.6 * _fpAds);              // calmer bob while aiming
+  const bobY = Math.sin(_fpBobPhase * 2) * bobAmt;
+  const bobX = Math.cos(_fpBobPhase) * bobAmt * 0.6;
+  // eye position + a little ground-plane bob + a recoil lift
+  const rX = Math.cos(yaw), rZ = -Math.sin(yaw);                         // screen-right on the ground plane
+  camera.position.set(
+    player.pos.x + rX * bobX,
+    player.pos.y + EYE + bobY + recoil * 0.25,
+    player.pos.z + rZ * bobX
+  );
+  // FOV: tight hipfire → tighter ADS
+  const wantFov = CAM.fpFov + (CAM.fpFovAim - CAM.fpFov) * _fpAds;
   _curFov += (wantFov - _curFov) * camDamp(CAM.fovTau, dt);
   if (Math.abs(camera.fov - _curFov) > 0.02) { camera.fov = _curFov; camera.updateProjectionMatrix(); }
-  camera.lookAt(head.x + _dir.x, head.y + _dir.y + recoil * CAM.recoilAim, head.z + _dir.z);
-  recoil = Math.max(0, recoil - dt * CAM.recoilDecay);
+  // look down the aim ray with a recoil pitch kick
+  const pk = recoil * CAM.fpRecoilPitch;
+  const cpz2 = Math.cos(pitch + pk);
+  camera.lookAt(
+    camera.position.x + Math.sin(yaw) * cpz2,
+    camera.position.y + Math.sin(pitch + pk),
+    camera.position.z + Math.cos(yaw) * cpz2
+  );
+  // ---- viewmodel ----
+  ensureViewmodel();
+  if (!_vmRoot) return;
+  _vmRoot.visible = true;
+  // look-sway: the gun lags opposite to mouse movement, then settles
+  if (_fpPrevYaw == null) { _fpPrevYaw = yaw; _fpPrevPitch = pitch; }
+  let dyaw = yaw - _fpPrevYaw; if (dyaw > Math.PI) dyaw -= Math.PI * 2; else if (dyaw < -Math.PI) dyaw += Math.PI * 2;
+  const dpitch = pitch - _fpPrevPitch;
+  _fpPrevYaw = yaw; _fpPrevPitch = pitch;
+  const sk = camDamp(CAM.fpSwayTau, dt);
+  const clamp1 = (x) => (x < -1 ? -1 : x > 1 ? 1 : x);
+  _fpSwayX += (clamp1(-dyaw * 8) * CAM.fpSway - _fpSwayX) * sk;
+  _fpSwayY += (clamp1(dpitch * 8) * CAM.fpSway - _fpSwayY) * sk;
+  // hip vs ADS base pose (camera space): hip low-right; ADS centred + raised to the sight line
+  const ads = _fpAds;
+  _vmHolder.position.set(0.16 * (1 - ads), -0.16 * (1 - ads) + -0.05 * ads, -0.45 * (1 - ads) + -0.30 * ads);
+  // bob + sway + recoil ride on the animated root
+  _vmRoot.position.set(_fpSwayX + bobX * 0.5, _fpSwayY + bobY * 0.6 - recoil * 0.04, -recoil * 0.12);
+  _vmRoot.rotation.set(_fpSwayY * 1.5 + recoil * 0.22, _fpSwayX * 1.5, _fpSwayX * 0.5);
+}
+
+// Build / refresh the first-person weapon viewmodel by cloning Lane A's current
+// weapon MESH children (not the whole group: cloning children gives direct handles
+// to re-material them for the on-top viewmodel pass, and we recreate our own muzzle
+// marker rather than carry the group's userData), parented to the camera.
+function ensureViewmodel() {
+  try {
+    if (!camera) return;
+    if (scene && camera.parent !== scene) scene.add(camera);            // so camera's children (the viewmodel) render
+    if (!_vmRoot) {
+      _vmRoot = new THREE.Group();
+      _vmHolder = new THREE.Group();
+      _vmHolder.rotation.y = Math.PI;                                   // gun barrel (+Z local) → camera forward (−Z)
+      _vmRoot.add(_vmHolder);
+      camera.add(_vmRoot);
+    }
+    const ud = player.mesh && player.mesh.userData;
+    const id = (ud && ud.weapon) || 'pistol';
+    if (id === _vmWeaponId) return;                                     // already showing the right gun
+    _vmWeaponId = id;
+    // discard the previous clone, DISPOSING its materials (we cloned those). Geometry
+    // is shared by reference with Lane A's rig — must NOT be disposed.
+    while (_vmHolder.children.length) {
+      const old = _vmHolder.children[0];
+      old.traverse((o) => { if (o.isMesh && o.material && o.material.dispose) o.material.dispose(); });
+      _vmHolder.remove(old);
+    }
+    const src = ud && ud.weapons && ud.weapons[id];
+    if (!src) return;                                                   // fists / no mesh → empty viewmodel (no throw)
+    for (const child of src.children) {
+      if (src.userData && child === src.userData.muzzle) continue;      // skip the empty muzzle marker
+      const c = child.clone(true);                                      // shares geometry; materials re-cloned below
+      c.traverse((o) => {
+        if (!o.isMesh) return;
+        o.castShadow = false; o.receiveShadow = false; o.renderOrder = 20;
+        if (o.material && o.material.clone) { o.material = o.material.clone(); o.material.depthTest = false; o.material.depthWrite = false; o.material.needsUpdate = true; }
+      });
+      _vmHolder.add(c);
+    }
+  } catch (e) { console.warn('[ONFOOT] viewmodel build failed; FP camera only', e); }
 }
 
 // ============================================================
@@ -1596,16 +1740,31 @@ function updateDriving(dt) {
   for (let i = 0; i < v.wheels.length; i++) v.wheels[i].rotation.x -= v.speed * dt * 0.6;  // roll
   for (const sp of v.steerPivots) sp.rotation.y = steer * 0.4;                              // front-wheel steer
 
-  // chase camera: smoothly trail behind the car; FOV widens with speed for a sense of velocity
-  const target = _v.copy(v.pos); target.y += 1.3;
-  const desired = _v2.set(v.pos.x - fx * CAR_CAM_DIST, CAR_CAM_HEIGHT, v.pos.z - fz * CAR_CAM_DIST);
+  // chase camera (Lane B sub-block ONLY — physics above is Lane D): a behind-and-
+  // above GTA cam. It trails a SMOOTHED heading (so hard steering reads as the camera
+  // catching up, not snapping), pulls farther back + a touch higher with speed, looks
+  // ahead of the car, and eases off any wall directly behind it.
+  if (_vmRoot) _vmRoot.visible = false;                          // no FP viewmodel while driving
+  const sf = Math.min(1, Math.abs(v.speed) / CAR_MAX_SPEED);
+  if (!_driveInit) { _driveFwd.set(fx, 0, fz); _driveInit = true; }
+  _driveFwd.x += (fx - _driveFwd.x) * camDamp(CAM.driveYawTau, dt);
+  _driveFwd.z += (fz - _driveFwd.z) * camDamp(CAM.driveYawTau, dt);
+  const dl = Math.hypot(_driveFwd.x, _driveFwd.z) || 1;
+  const tfx = _driveFwd.x / dl, tfz = _driveFwd.z / dl;            // normalised trail-forward
+  const dist = CAM.driveDist + CAM.driveDistSpeed * sf;            // pull back with speed
+  const height = CAM.driveHeight + CAM.driveHeightSpeed * sf;
+  let cdist = dist;                                               // ease off a building directly behind us
+  for (let s = 0; s < 5; s++) {
+    if (!insideBuilding(v.pos.x - tfx * cdist, v.pos.z - tfz * cdist, 0.6)) break;
+    cdist -= 1.0; if (cdist < 3.0) { cdist = 3.0; break; }
+  }
+  const desired = _v2.set(v.pos.x - tfx * cdist, height, v.pos.z - tfz * cdist);
   camera.position.lerp(desired, camDamp(CAM.driveTau, dt));
   if (camera.position.y < 1.2) camera.position.y = 1.2;
-  const speedFrac = Math.min(1, Math.abs(v.speed) / CAR_MAX_SPEED);
-  const wantFov = CAM.fovBase + (CAM.fovDrive - CAM.fovBase) * speedFrac;
+  const wantFov = CAM.fovBase + (CAM.fovDrive - CAM.fovBase) * sf; // FOV widens with speed (velocity)
   _curFov += (wantFov - _curFov) * camDamp(CAM.fovTau, dt);
   camera.fov = _curFov; camera.updateProjectionMatrix();
-  camera.lookAt(target.x + fx * 4, target.y, target.z + fz * 4);
+  camera.lookAt(v.pos.x + fx * CAM.driveAhead, v.pos.y + CAM.driveLook, v.pos.z + fz * CAM.driveAhead);
 
   updateHud();
 }
