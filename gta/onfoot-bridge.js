@@ -25,6 +25,8 @@ import './economy.js';
 import './police.js';
 import './combat.js';
 import './physics.js';   // dynamic car-vs-building impact (registers the 'physics' system)
+import './traffic.js';   // ambient NPC traffic AI (registers the 'traffic' system)
+import './pickups.js';   // health/armor pickup respawn scheduler (registers 'pickups')
 import './hud-radar.js';
 import './onfoot-heist.js';
 import { buildWorldDetail } from './onfoot-detail.js';
@@ -42,6 +44,7 @@ let _shakeMag = 0, _flashEl = null;
 let _detailBuilt = false;
 let _realism = null, _realismBuilt = false;   // post-FX + textures pipeline (browser only)
 let _fxLoaded = false;                         // gta/fx.js (Lane B) — optional particle/FX module
+let _audioLoaded = false;                      // gta/audio.js (Lane B) — optional audio module
 
 // ---- real input state (fed to combat.js) -----------------------------------
 let _mouseDown = false, _mouseWired = false;
@@ -124,6 +127,15 @@ function makeVehiclesShim() {
         const heading = (opts && opts.heading) || 0, color = (opts && opts.color) || 0x394150;
         try { return I.spawnVehicle(x, z, heading, color); } catch (e) { return null; }
       },
+      // ambient traffic spawn: prefer Lane A's civilian NPC-car factory (separate
+      // internals.traffic[], out of the jack/run-over loop); fall back to a normal
+      // jackable spawnVehicle when A's factory isn't present (e.g. headless harness).
+      spawnTraffic(x, z, opts) {
+        if (I && typeof I.spawnTrafficCar === 'function') {
+          try { const rec = I.spawnTrafficCar(x, z, (opts && opts.heading) || 0, opts || {}); if (rec) return rec; } catch (e) { /* fall through */ }
+        }
+        return this.spawnAt(x, z, opts);
+      },
       forceExit() { try { if (I && I.mode === 'drive' && I.exitVehicle) I.exitVehicle(); } catch (e) {} },
     },
   };
@@ -163,6 +175,7 @@ function buildCtx() {
     },
     world: null,
     targets: [],
+    traffic: [],            // live ambient NPC cars (gta/traffic.js fills this; mirrored to internals.traffic)
     time: { t: 0, dt: 0 },
     rng: GU.makeRng(0x6CED2A11),
     config: { difficulty: 0.9, pedDensity: 1, persist: true, mode: 'onfoot' },
@@ -241,6 +254,8 @@ function wireFeedback() {
   GTA.bus.on('shake', (p) => { _shakeMag = Math.min(1.4, _shakeMag + ((p && p.amount) || 0)); });
   // bystanders panic at gunfire (combat owns firing now, so wire it via the crime feed)
   GTA.bus.on('crime', (p) => { if (p && p.kind === 'gunfire' && I && I.startleNearby) { try { I.startleNearby(); } catch (e) {} } });
+  // explosions (Lane A's grenade etc.) scatter a wide radius of peds
+  GTA.bus.on('fx:explosion', (p) => { if (p && p.pos && I && I.panicPeds) { try { I.panicPeds(p.pos.x, p.pos.z, 14, 'scatter'); } catch (e) {} } });
   GTA.bus.on('playerHurt', () => {
     ensureFlash();
     if (!_flashEl) return;
@@ -308,7 +323,36 @@ function loadFx(ctx) {
 }
 
 // ============================================================
-// PICKUPS — guns (bridge) + ammo/health/armor (economy)
+// AUDIO MODULE SEAM — gta/audio.js (Lane B's radio/music + soundscape layer)
+// ------------------------------------------------------------
+// Loaded exactly like fx.js: dynamic-imported + try/caught, so the layer runs
+// whether or not audio.js exists yet. CONTRACT (also in REQUESTS.md):
+//   * audio.js self-registers a GTA system (name:'audio') OR exports install(ctx, GTA).
+//   * It reacts to bus events: audio:station, fx:explosion, crime(gunfire),
+//     entityKilled, pickup, wanted:changed, vehicle:jacked.
+//   * MUST be headless-safe: guard AudioContext/DOM behind ctx.headless so the
+//     node sim runs without a browser. Must NOT set OF.renderHook.
+// The radio-station key is read in onTick (brackets → 'audio:station {dir}').
+function loadAudio(ctx) {
+  if (_audioLoaded) return Promise.resolve();
+  _audioLoaded = true;
+  return import('./audio.js').then((mod) => {
+    try {
+      const install = mod && (mod.install || (typeof mod.default === 'function' ? mod.default : null));
+      if (install) install(ctx, GTA);
+      else if (mod && mod.default && mod.default.name && GTA.register) GTA.register(mod.default);
+      if (GTA.systems.audio) console.info('[GTA bridge] audio layer loaded');
+    } catch (e) { console.warn('[GTA] audio.js found but install failed; running silent', e); }
+  }).catch((e) => {
+    const m = String((e && (e.code || e.message)) || e);
+    if (!/Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (fetch|load)|Error resolving module/i.test(m)) {
+      console.warn('[GTA] audio.js present but failed to load', e);
+    }
+  });
+}
+
+// ============================================================
+// PICKUPS — guns (bridge) + ammo/health/armor (economy + respawn via pickups.js)
 // ============================================================
 function buildGunPickup(id, x, z) {
   const THREE = I.THREE;
@@ -354,11 +398,15 @@ function placePickups() {
   spawnWeaponPickup('smg', -14, 10);
   spawnWeaponPickup('shotgun', 16, 14);
   spawnWeaponPickup('ak47', -2, -34);     // near the bank approach
-  // ammo / health / armor crates via economy's pickup manager
+  // ammo / health / armor crates via economy's pickup manager.
   const drop = (kind, value, x, z) => GTA.bus.emit('spawnPickup', { kind, value, pos: { x, y: 0, z } });
+  // health/armor also register a respawn SEED (gta/pickups.js re-drops them on a
+  // timer after collection, so a long fight doesn't strip the map permanently).
+  const pk = ctx.systems.pickups && ctx.systems.pickups.api;
+  const seed = (kind, value, x, z) => { drop(kind, value, x, z); if (pk) pk.seed(kind, value, x, z); };
   drop('ammo', 90, 6, 6); drop('ammo', 120, -10, -10); drop('ammo', 120, 20, -20); drop('ammo', 90, -22, 18);
-  drop('armor', 100, 4, -8); drop('armor', 50, -18, -4);
-  drop('health', 40, 12, 12); drop('health', 40, -8, 20); drop('health', 40, 0, -28);
+  seed('armor', 100, 4, -8); seed('armor', 50, -18, -4);
+  seed('health', 40, 12, 12); seed('health', 40, -8, 20); seed('health', 40, 0, -28);
 }
 
 // ============================================================
@@ -412,10 +460,15 @@ function onEnter() {
       if (c) { c.giveWeapon('pistol', true); c.giveWeapon('ak47', false); }
       ctx.player.health = ctx.player.maxHealth; ctx.player.armor = 100;
       placePickups();
-      // optional Lane-B particle/FX layer; no-op until gta/fx.js lands. The
-      // promise is exposed so headless harnesses (onfoot-sim) can await the async
-      // module load before driving frames — otherwise it covers fx for free.
+      // expose the live ambient-traffic list to host-side readers (Lane A/B) as
+      // window.ONFOOT.internals.traffic — but DON'T clobber it if Lane A already
+      // defined the array via its spawnTrafficCar factory (we feed that one instead).
+      if (!Array.isArray(I.traffic)) I.traffic = ctx.traffic;
+      // optional Lane-B layers; no-ops until gta/fx.js / gta/audio.js land. The
+      // promises are exposed so headless harnesses (onfoot-sim) can await the
+      // async module loads before driving frames — otherwise they cover for free.
       OF.fxReady = loadFx(ctx);
+      OF.audioReady = loadAudio(ctx);
     } else {
       _lastPx = _lastPy = _lastPz = null;
       ctx.player.health = ctx.player.maxHealth; ctx.player.alive = true;
@@ -446,12 +499,17 @@ function onExit() {
 
 function onTick(dt) {
   if (!active || !booted) return;
+  if (window.ONFOOT && window.ONFOOT.paused) return;   // Lane B's pause menu freezes the sandbox
   try {
     // just-pressed keys: read onfoot3d's edge-pressed set (captured at keydown
     // time so fast taps of Tab/R/Digit aren't lost), then clear it for next frame.
     _justKeys.clear();
     if (I.justPressed) { for (const k of I.justPressed) _justKeys.add(k); I.justPressed.clear(); }
     else { for (const k of I.keys) if (!_prevKeys.has(k)) _justKeys.add(k); _prevKeys = new Set(I.keys); }
+
+    // radio station cycle (Lane B's gta/audio.js consumes this) — ]/[ next/prev.
+    if (_justKeys.has('BracketRight')) { _justKeys.delete('BracketRight'); GTA.bus.emit('audio:station', { dir: 1 }); }
+    if (_justKeys.has('BracketLeft'))  { _justKeys.delete('BracketLeft');  GTA.bus.emit('audio:station', { dir: -1 }); }
 
     const driving = I.mode === 'drive' && I.playerVehicle;
     ctx.player.yaw = driving ? I.playerVehicle.heading : I.yaw;

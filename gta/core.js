@@ -81,8 +81,17 @@ if (typeof window !== 'undefined') window.GTA = GTA;
 //   fx:explosion     {pos, radius?}                    vehicle/explosive blast
 //   fx:spawn         {pos, kind?, color?}              generic one-shot particle burst
 //   fx:crash         {pos, severity, speed, normal?, damage}  car-vs-building impact (dust/crumple)
-// --- mode / state events ---
+// --- AI / world systems (round 3) ---
+//   police:backup    {stars, reason, pos?}             a backup wave is incoming (officer down / escalation)
+//   faction:spawn    {faction, pos, count}             a non-police faction (e.g. 'gang') appeared
+//   faction:fight    {a, b, pos}                       two factions/entities engaged each other
+//   traffic:spawned  {vehicle, pos}                    an ambient NPC car entered the world
+//   traffic:despawned{vehicle}                         an ambient NPC car was culled
+//   pickup:respawn   {kind, pos}                       a health/armor pickup re-seeded (bridge timer)
+// --- mode / state / audio events ---
 //   fp:toggle        {firstPerson}                     first/third-person view toggled (V)
+//   audio:station    {dir}                             cycle radio station (+1 next / -1 prev) — gta/audio.js
+//   audio:mute       {muted}                           master mute toggled
 // ============================================================
 function makeBus() {
   const map = new Map();          // type -> Set<fn>
