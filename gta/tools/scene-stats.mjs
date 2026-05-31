@@ -17,7 +17,9 @@ function extract(sig) {
   for (; k < src.length; k++) { const c = src[k]; if (c === '{') depth++; else if (c === '}') { depth--; if (depth === 0) { k++; break; } } }
   return src.slice(i, k);
 }
-const buildPerson = new Function('THREE', extract('function buildPerson(colors, armed) {') + '\n return buildPerson;')(THREE);
+// buildPerson reads OF._makeActor (rigged-model path); pass an empty OF so it
+// takes the procedural fallback — same contract the sims/mesh-check use headless.
+const buildPerson = new Function('THREE', 'OF', extract('function buildPerson(colors, armed) {') + '\n return buildPerson;')(THREE, {});
 const buildBuilding = new Function('THREE',
   extract('function buildBuilding(rng) {') + '\n return buildBuilding;')(THREE);
 const mkrng = (s) => { let x = s >>> 0 || 1; return () => (x = (x * 1664525 + 1013904223) >>> 0) / 4294967296; };

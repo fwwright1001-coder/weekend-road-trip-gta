@@ -3,9 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Crime-sandbox systems layer (wanted/police/economy/missions/radar) bolted onto the Weekend Road Trip on-foot mode. Browser-loaded as ES modules; this package.json only exists to run the headless alpha smoke test under Node.",
+  "description": "Crime-sandbox systems layer (wanted/police/economy/missions/radar) bolted onto the Weekend Road Trip on-foot mode. Browser-loaded as ES modules; this package.json only exists to run the headless smoke suite under Node.",
   "scripts": {
-    "smoke": "node tools/onfoot-smoke.mjs"
+    "smoke": "node tools/onfoot-smoke.mjs",
+    "test": "node tools/onfoot-smoke.mjs",
+    "sim": "node tools/onfoot-sim.mjs",
+    "mesh-check": "node tools/mesh-check.mjs",
+    "aim-check": "node tools/aim-check.mjs",
+    "actor-check": "node tools/actor-check.mjs",
+    "collision-probe": "node tools/collision-probe.mjs",
+    "scene-stats": "node tools/scene-stats.mjs"
   },
   "devDependencies": {
     "three": "0.170.0"
