@@ -18,9 +18,9 @@ Open it in Chrome or Edge. Needs an internet connection (Three.js streams from a
 **The drive:** `Space`/`W`/`↑` jump · `S`/`↓` duck · `D`/`→` accelerate · `A`/`←` brake. Reach the coast.
 
 **On foot (unlocked at the finish, or via the `#gta` link):**
-click to capture the mouse · `WASD` walk · mouse look · **click** shoot · `R` reload · `Space` jump · `Shift` run · `E` to steal/exit a car · `P` to quit back to the title.
+click to capture the mouse · `WASD` walk · mouse look · **click** shoot · `R` reload · `Space` jump · `Shift` run · `E` to steal/exit a car · `V` first/third-person toggle · `P` to quit back to the title.
 
-**Driving:** `W`/`S` throttle/brake/reverse · `A`/`D` steer · `Space` handbrake · `E` to get out.
+**Driving:** `W`/`S` throttle/brake/reverse · `A`/`D` steer · `Space` handbrake · `E` to get out. Slam into a building and the car takes a real momentum hit — speed bleeds or bounces, the body jolts, and the screen shakes (bigger crashes against taller buildings).
 
 ## Tech
 
@@ -41,7 +41,11 @@ Inside `gta/`, every system shares the same `{name, init, update, reset, api}` s
 
 - `core.js` — the spine: `GTA` namespace, event bus, system registry, math utils.
 - `onfoot-bridge.js` — integration host: builds the shared `ctx` from `ONFOOT.internals`, registers systems, owns combat input + screen feedback + pickups, and is the single entry that imports everything below.
-- `combat.js` (weapons/firing/ammo) · `wanted.js` (stars) · `police.js` (cop AI) · `economy.js` (money + pickups) · `hud-radar.js` (HUD + minimap) · `onfoot-heist.js` + `onfoot-bank.js` (the bank-heist mission) · `onfoot-detail.js` / `onfoot-textures.js` / `onfoot-actors.js` (props, textures, rigged NPCs) · `onfoot-render.js` (browser-only realism post-FX) · `fx.js` (optional particle/screen FX).
+- `combat.js` (weapons/firing/ammo) · `wanted.js` (stars) · `police.js` (cop AI) · `economy.js` (money + pickups) · `physics.js` (dynamic car-vs-building impact) · `hud-radar.js` (HUD + minimap) · `onfoot-heist.js` + `onfoot-bank.js` (the bank-heist mission) · `onfoot-detail.js` / `onfoot-textures.js` / `onfoot-actors.js` (props, textures, rigged NPCs) · `onfoot-render.js` (browser-only realism post-FX) · `fx.js` (optional particle/screen FX).
+
+**First-person mode:** `V` toggles `window.ONFOOT.firstPerson`. The host owns the state + body-mesh visibility + the V key; the camera/viewmodel live in the render/fx layer. The aim ray is camera-based, so shooting stays correct in either view.
+
+**Event bus additions (this round):** `fx:crash {pos, severity, speed, normal, damage}` (car impact — dust/crumple), `fx:impact` + `shake` (also fired on crash), `fx:casing {pos, dir, weaponId}` (shell eject), and `fp:toggle {firstPerson}`. See the canonical catalog comment in `gta/core.js`.
 
 ## Run it locally
 
