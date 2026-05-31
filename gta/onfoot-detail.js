@@ -786,6 +786,18 @@ export function buildWorldDetail(THREE, scene, opts = {}) {
   // ============================================================
   scene.add(root);
 
+  // Opt the decorative streetlamp heads + fire barrels into Lane C's day/night
+  // ramp (onfoot3d owns the cycle), so the prettier lamps glow at night too. The
+  // host lamps + lit windows are already registered there; this just adds these.
+  // Guarded so the headless audit (no window.ONFOOT) skips it harmlessly.
+  try {
+    const OF = (typeof window !== 'undefined') && window.ONFOOT;
+    if (OF && typeof OF.registerNightLight === 'function') {
+      OF.registerNightLight(M.lampGlass, 0.18, 1.3);   // dim by day, bright at night
+      OF.registerNightLight(M.fire, 0.85, 1.1);        // fire barrels stay mostly lit
+    }
+  } catch (e) { /* night-light opt-in is optional */ }
+
   // small machine-readable summary on the group for debugging / HUD overlays
   root.userData.detail = {
     props: placed.length,
