@@ -98,6 +98,13 @@ const sys = {
   _crosshairAimShown: null,     // dedupe crosshair .aim toggling
   _crosshairEmptyShown: null,   // dedupe crosshair .empty toggling
 
+  // pause / settings overlay (Lane B)
+  _menu: null,
+  _menuOpen: false,
+  _menuStationShown: null,
+  _menuWired: false,
+  _settingsApplied: false,      // re-apply persisted volumes once audio.js/fx.js are loaded
+
   _unsubs: [],
 
   // --------------------------------------------------------
@@ -157,6 +164,135 @@ const sys = {
       }));
       this._unsubs.push(bus.on('toast', (p) => this._showToast(ctx, p)));
     }
+
+    // pause / settings overlay
+    try { this._buildMenu(); } catch (e) { /* never block HUD init */ }
+  },
+
+  // ========================================================
+  // PAUSE / SETTINGS MENU (Lane B) — a self-contained DOM overlay built here so
+  // index.html (Lane D) needs no changes. Opens on Esc; sets window.ONFOOT.paused
+  // (onfoot3d gates clicks on it); mixes music (audio.js) + sfx (fx.js), screen
+  // shake, FP, and restart. Settings persist in localStorage.
+  // ========================================================
+  _settingsKey: 'wrt.gta.settings',
+  _loadSettings() {
+    try { return Object.assign({ music: 45, sfx: 80, shakeOn: true, shake: 100, fp: false }, JSON.parse(localStorage.getItem(this._settingsKey) || '{}')); }
+    catch (e) { return { music: 45, sfx: 80, shakeOn: true, shake: 100, fp: false }; }
+  },
+  _saveSettings(s) { try { localStorage.setItem(this._settingsKey, JSON.stringify(s)); } catch (e) {} },
+  _applySettings(s) {
+    try {
+      const A = (typeof window !== 'undefined') && window.ONFOOT_AUDIO;
+      const F = (typeof window !== 'undefined') && window.ONFOOT_FX;
+      if (A && A.setMusicVolume) A.setMusicVolume(s.music / 100);
+      if (F && F.setVolume) F.setVolume(s.sfx / 100);
+      if (F && F.setShakeEnabled) F.setShakeEnabled(!!s.shakeOn);
+      if (F && F.setShakeScale) F.setShakeScale(s.shake / 100);
+    } catch (e) { /* systems may not be loaded yet; re-applied on open */ }
+  },
+  _buildMenu() {
+    if (this._menu || typeof document === 'undefined') return;
+    const frame = document.getElementById('frame') || document.body;
+    if (!frame) return;
+    const s = this._loadSettings();
+    const m = document.createElement('div');
+    m.id = 'gta-menu';
+    m.className = 'hidden';
+    m.innerHTML =
+      '<div class="gta-menu-panel" role="dialog" aria-label="Settings menu">' +
+      '<h2>SETTINGS</h2>' +
+      '<div class="gta-menu-row"><span>📻 Radio</span><button class="gta-menu-radio" data-act="radio"><b id="gta-menu-station">—</b> ▸</button></div>' +
+      '<div class="gta-menu-row"><label for="gta-m-music">Music</label><input id="gta-m-music" type="range" min="0" max="100"></div>' +
+      '<div class="gta-menu-row"><label for="gta-m-sfx">SFX</label><input id="gta-m-sfx" type="range" min="0" max="100"></div>' +
+      '<div class="gta-menu-row"><label for="gta-m-shakeon">Screen shake</label><input id="gta-m-shakeon" type="checkbox"></div>' +
+      '<div class="gta-menu-row"><label for="gta-m-shake">Shake intensity</label><input id="gta-m-shake" type="range" min="0" max="100"></div>' +
+      '<div class="gta-menu-row"><label for="gta-m-fp">First-person (V)</label><input id="gta-m-fp" type="checkbox"></div>' +
+      '<div class="gta-menu-actions"><button class="gta-menu-btn primary" data-act="resume">RESUME</button>' +
+      '<button class="gta-menu-btn" data-act="restart">RESTART</button></div>' +
+      '<p class="gta-menu-hint"><b>Esc</b> opens this &middot; <b>RESUME</b> to play &middot; <b>[ ]</b> cycle radio</p>' +
+      '</div>';
+    frame.appendChild(m);
+    this._menu = m;
+
+    const $ = (id) => m.querySelector(id);
+    const music = $('#gta-m-music'), sfx = $('#gta-m-sfx'), shakeOn = $('#gta-m-shakeon'), shake = $('#gta-m-shake'), fp = $('#gta-m-fp');
+    music.value = s.music; sfx.value = s.sfx; shakeOn.checked = !!s.shakeOn; shake.value = s.shake; fp.checked = !!s.fp;
+    this._applySettings(s);
+
+    const persist = () => {
+      const cur = { music: +music.value, sfx: +sfx.value, shakeOn: shakeOn.checked, shake: +shake.value, fp: fp.checked };
+      this._applySettings(cur); this._saveSettings(cur);
+    };
+    music.addEventListener('input', persist);
+    sfx.addEventListener('input', persist);
+    shakeOn.addEventListener('change', persist);
+    shake.addEventListener('input', persist);
+    fp.addEventListener('change', () => {
+      // Lane D owns the firstPerson flag, but a settings checkbox writing the same bool is benign.
+      try { if (window.ONFOOT) window.ONFOOT.firstPerson = fp.checked; } catch (e) {}
+      persist();
+    });
+    // don't let clicks inside the panel bubble to the canvas (belt-and-suspenders; onMouseDown is also OF.paused-gated)
+    m.addEventListener('mousedown', (e) => e.stopPropagation());
+    m.addEventListener('click', (e) => {
+      const act = e.target && e.target.getAttribute && e.target.closest('[data-act]') && e.target.closest('[data-act]').getAttribute('data-act');
+      if (act === 'resume') this._closeMenu();
+      else if (act === 'restart') { try { location.reload(); } catch (e2) {} }
+      else if (act === 'radio') { try { if (window.ONFOOT_AUDIO && window.ONFOOT_AUDIO.cycleStation) window.ONFOOT_AUDIO.cycleStation(); } catch (e2) {} this._syncStation(); }
+    });
+
+    if (!this._menuWired) {
+      this._menuWired = true;
+      // onfoot3d.onKeyDown stopImmediatePropagation()s every key while active, so a
+      // keydown listener here is dead. Instead drive the menu off pointer-lock: pressing
+      // Esc (or losing focus) releases the lock → open the menu; re-locking closes it.
+      document.addEventListener('pointerlockchange', () => {
+        try {
+          const OF = (typeof window !== 'undefined') && window.ONFOOT;
+          if (!OF || !OF.active) return;
+          const locked = !!document.pointerLockElement;
+          if (locked) { if (this._menuOpen) this._closeMenu(); }
+          else if (!this._menuOpen && OF.internals && OF.internals.mode === 'foot') this._openMenu();   // foot only (car-entry unlock has mode 'drive')
+        } catch (e) { /* optional */ }
+      }, false);
+    }
+  },
+  _syncStation() {
+    try {
+      const lbl = this._menu && this._menu.querySelector('#gta-menu-station');
+      const st = window.ONFOOT_AUDIO && window.ONFOOT_AUDIO.station && window.ONFOOT_AUDIO.station();
+      const name = st ? st.name : '—';
+      if (lbl && name !== this._menuStationShown) { lbl.textContent = name; this._menuStationShown = name; }
+    } catch (e) { /* optional */ }
+  },
+  _openMenu() {
+    if (!this._menu || this._menuOpen) return;
+    this._menuOpen = true;
+    try { if (window.ONFOOT) window.ONFOOT.paused = true; } catch (e) {}
+    // stop residual movement + release the mouse so the cursor is usable
+    try { const I = window.ONFOOT && window.ONFOOT.internals; if (I && I.keys) I.keys.clear(); } catch (e) {}
+    try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
+    // re-sync controls from the persisted state + the live station (systems are loaded by now)
+    try {
+      const s = this._loadSettings(); const m = this._menu;
+      m.querySelector('#gta-m-music').value = s.music; m.querySelector('#gta-m-sfx').value = s.sfx;
+      m.querySelector('#gta-m-shakeon').checked = !!s.shakeOn; m.querySelector('#gta-m-shake').value = s.shake;
+      m.querySelector('#gta-m-fp').checked = !!(window.ONFOOT && window.ONFOOT.firstPerson);
+      this._applySettings(s);
+    } catch (e) {}
+    this._syncStation();
+    this._menu.classList.remove('hidden');
+    if (typeof document !== 'undefined') document.body.classList.add('gta-menu-open');
+  },
+  _closeMenu() {
+    if (!this._menu || !this._menuOpen) return;
+    this._menuOpen = false;
+    this._menu.classList.add('hidden');
+    if (typeof document !== 'undefined') document.body.classList.remove('gta-menu-open');
+    try { if (window.ONFOOT) window.ONFOOT.paused = false; } catch (e) {}
+    // best-effort re-lock so the player drops straight back into the action
+    try { const I = window.ONFOOT && window.ONFOOT.internals; if (I && I.canvas && I.canvas.requestPointerLock) I.canvas.requestPointerLock(); } catch (e) {}
   },
 
   // --------------------------------------------------------
@@ -197,6 +333,12 @@ const sys = {
   // --------------------------------------------------------
   update(dt, ctx) {
     if (!ctx) return;
+    // persisted volumes apply once audio.js/fx.js have registered their window.* api
+    // (they load AFTER this HUD inits, so the build-time apply may have no-op'd).
+    if (!this._settingsApplied && typeof window !== 'undefined' && window.ONFOOT_AUDIO && window.ONFOOT_FX) {
+      try { this._applySettings(this._loadSettings()); } catch (e) {}
+      this._settingsApplied = true;
+    }
     // each painter is independently guarded so a problem with one HUD piece
     // never blanks the others or throws into the host loop.
     try { this._paintStars(ctx); } catch (e) { /* swallow */ }
@@ -207,6 +349,7 @@ const sys = {
     try { this._paintCrosshair(ctx); } catch (e) { /* swallow */ }
     try { this._tickToast(ctx); } catch (e) { /* swallow */ }
     try { this._paintRadar(ctx); } catch (e) { /* swallow */ }
+    if (this._menuOpen) { try { this._syncStation(); } catch (e) { /* swallow */ } }
   },
 
   // ========================================================

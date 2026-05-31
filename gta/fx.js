@@ -54,7 +54,7 @@ const SURFACES = {
 const SLOT_WEAPON = { 1: 'fists', 2: 'pistol', 3: 'ak47', 4: 'smg', 5: 'shotgun' };
 // per-weapon recoil kick fed to the host camera (window.ONFOOT.kick) on each shot,
 // so combat-owned firing kicks the third-person AND first-person camera.
-const KICK = { fists: 0, pistol: 0.03, ak47: 0.05, smg: 0.025, shotgun: 0.09 };
+const KICK = { fists: 0, pistol: 0.03, ak47: 0.05, smg: 0.025, shotgun: 0.09, grenade: 0 };
 
 // ---- module state ----------------------------------------------------------
 let THREE = null;
@@ -76,6 +76,13 @@ let _casings = null;          // { items: [{mesh,mat,vx,vy,vz,ax,ay,az,life,maxL
 // (off the crime{gunfire} event) so we never double up.
 let _explicitCasing = false, _explicitMuzzle = false;
 let _tmpVec = null;           // lazy scratch Vector3 for muzzle world position
+
+// transient EVENT lights (muzzle/explosion flashes) — pooled THREE.PointLights.
+// EVENT lighting ONLY; the global sun/sky/day-night ambient light is Lane C's.
+const LIGHT_CAP = 6;
+let _lights = null;           // { items:[{light,life,maxLife,base}], head }
+// menu-controllable shake (settings: toggle + intensity)
+let _shakeScale = 1, _shakeEnabled = true;
 
 // footstep pacing
 let _lastFoot = null;         // {x,z} player pos at last footstep sample
@@ -156,6 +163,7 @@ function gunReport(weaponId) {
   try {
     if (!audioReady()) return;
     if (weaponId === 'fists') { tone(_ac.currentTime, 'sine', 180, 60, 0.07, 0.18); return; }
+    if (weaponId === 'grenade') return;   // a grenade's crime{gunfire} blast → no gun crack (the boom covers it)
     const p = GUN[weaponId] || GUN.pistol;
     const t = _ac.currentTime;
     noiseBurst(t, p.crackD, p.crackG, 'highpass', p.crackF, 0.7);          // sharp crack
@@ -188,6 +196,24 @@ function uiClick() {
   catch (e) { /* optional */ }
 }
 
+// reload SFX (Lane A emits weapon:reload {id, phase:'start'|'end', duration, ...}).
+// Lives in fx.js (the SFX engine), not audio.js (which is music/ambience).
+function reloadSound(id, phase, dur) {
+  try {
+    if (!audioReady()) return;
+    const t = _ac.currentTime;
+    if (id === 'grenade') {                                                // pin/spoon pull, no magazine
+      if (phase !== 'end') { tone(t, 'triangle', 2400, 1700, 0.05, 0.12); noiseBurst(t + 0.05, 0.04, 0.08, 'highpass', 3000, 2); }
+      return;
+    }
+    if (phase === 'end') { noiseBurst(t, 0.05, 0.18, 'bandpass', 2200, 3); tone(t, 'square', 320, 140, 0.04, 0.10); return; }   // bolt / charging handle
+    // 'start': magazine OUT now, magazine IN partway through the reload window
+    noiseBurst(t, 0.06, 0.14, 'bandpass', 1400, 2);
+    const inT = t + Math.max(0.2, (dur || 1.6) * 0.55);
+    noiseBurst(inT, 0.07, 0.18, 'bandpass', 1100, 2); tone(inT, 'square', 260, 120, 0.05, 0.12);
+  } catch (e) { /* optional */ }
+}
+
 function ambient(on) {
   try {
     if (on === false) {
@@ -209,7 +235,7 @@ function ambient(on) {
 }
 
 function setMuted(b) { _muted = !!b; if (_master) _master.gain.value = _muted ? 0 : _vol; }
-function setVolume(v) { _vol = Math.max(0, Math.min(1, v)); if (_master && !_muted) _master.gain.value = _vol; }
+function setVolume(v) { v = Number(v); if (!Number.isFinite(v)) return; _vol = Math.max(0, Math.min(1, v)); if (_master && !_muted) _master.gain.value = _vol; }
 
 // ============================================================
 // PARTICLES — two pooled THREE.Points systems
@@ -407,7 +433,7 @@ function muzzleSparks(pos, dir) {
 // precise emit ever lands, the latches below disable this so we never double up.
 function deriveShotFx() {
   try {
-    if (_curWeapon === 'fists') return;
+    if (_curWeapon === 'fists' || _curWeapon === 'grenade') return;   // no brass / muzzle for melee or thrown
     const I = (typeof window !== 'undefined' && window.ONFOOT && window.ONFOOT.internals) || null;
     if (!I || !THREE) return;
     const yaw = I.yaw || 0;
@@ -423,7 +449,7 @@ function deriveShotFx() {
     } else return;
     const muzPos = { x: mx, y: my, z: mz };
     if (!_explicitCasing) spawnCasing(muzPos, right, _curWeapon);
-    if (!_explicitMuzzle) { muzzleSmoke(muzPos); muzzleSparks(muzPos, fwd); }
+    if (!_explicitMuzzle) { muzzleSmoke(muzPos); muzzleSparks(muzPos, fwd); pulseLight(muzPos, 0xffe6a8, 4.5 * nightBoost(), 8, 0.06); }
   } catch (e) { /* optional */ }
 }
 
@@ -516,9 +542,116 @@ function muzzleSmoke(pos) {
 }
 
 // ============================================================
+// EVENT LIGHTING — pooled transient PointLights (muzzle / explosion flashes).
+// NOT the global sun/ambient (that's Lane C). We READ window.ONFOOT.timeOfDay
+// (0..1) to brighten flashes at night, degrading to no-boost when it's absent.
+// ============================================================
+function buildLights() {
+  if (_lights || _headless || !THREE || !_scene) return;
+  try {
+    const items = [];
+    for (let i = 0; i < LIGHT_CAP; i++) {
+      const L = new THREE.PointLight(0xffffff, 0, 14, 2);
+      L.visible = false; L.castShadow = false; _scene.add(L);
+      items.push({ light: L, life: 0, maxLife: 1, base: 0 });
+    }
+    _lights = { items, head: 0 };
+  } catch (e) { _lights = null; }
+}
+function nightBoost() {
+  try {
+    const t = (typeof window !== 'undefined' && window.ONFOOT && window.ONFOOT.timeOfDay);
+    if (typeof t !== 'number') return 1;
+    const nightness = (1 + Math.cos(t * Math.PI * 2)) / 2;   // assume 0/1=midnight, 0.5=noon → 1 at night, 0 at noon
+    return 1 + 0.8 * nightness;
+  } catch (e) { return 1; }
+}
+function pulseLight(pos, colorHex, intensity, distance, life) {
+  try {
+    if (!_lights || !pos || pos.x == null) return;
+    const e = _lights.items[_lights.head]; _lights.head = (_lights.head + 1) % _lights.items.length;
+    e.light.color.setHex(colorHex);
+    e.light.position.set(pos.x, pos.y != null ? pos.y : 1.4, pos.z);
+    e.light.distance = distance || 14; e.light.decay = 2;
+    e.base = intensity; e.light.intensity = intensity; e.light.visible = true;
+    e.life = life || 0.12; e.maxLife = e.life;
+  } catch (e) { /* optional */ }
+}
+function stepLights(dt) {
+  if (!_lights) return;
+  for (const e of _lights.items) {
+    if (e.life <= 0) continue;
+    e.life -= dt;
+    if (e.life <= 0) { e.light.intensity = 0; e.light.visible = false; continue; }
+    const f = e.life / e.maxLife;
+    e.light.intensity = e.base * f * f;   // quick quadratic decay (a flash, not a lamp)
+  }
+}
+
+// ============================================================
+// EXPLOSION — fireball + smoke + debris + boom + flash + (tamed) shake.
+// Driven by fx:explosion {pos, radius} (Lane A emits it for grenades).
+// ============================================================
+function spawnExplosion(pos, radius) {
+  try {
+    if (!pos || pos.x == null || pos.z == null) return;
+    const r = Math.max(1, radius || 3);
+    const x = pos.x, y = (pos.y != null ? pos.y : 0.6), z = pos.z;
+    if (_particlesOk && _spark) {
+      const hot = new THREE.Color(0xffe27a), core = new THREE.Color(0xff6a1e);   // fireball
+      const n = Math.round(26 + r * 4);
+      for (let i = 0; i < n; i++) {
+        const sp = (3 + Math.random() * 6) * (0.7 + r * 0.12);
+        const c = Math.random() < 0.5 ? hot : core;
+        emit(_spark, x, y, z,
+          (Math.random() * 2 - 1) * sp, Math.random() * sp * 0.9 + 1.5, (Math.random() * 2 - 1) * sp,
+          0.18 + Math.random() * 0.18, 0.28 + Math.random() * 0.32,
+          c.r, c.g, c.b, 1.7, PGRAV * 0.5);
+      }
+    }
+    if (_particlesOk && _smoke) {
+      const dark = new THREE.Color(0x35322f);                                    // smoke (rises, lingers)
+      const n2 = Math.round(12 + r * 2);
+      for (let i = 0; i < n2; i++) {
+        const sp = 1 + Math.random() * 2.4;
+        emit(_smoke, x, y + 0.3, z,
+          (Math.random() * 2 - 1) * sp, Math.random() * 1.8 + 0.6, (Math.random() * 2 - 1) * sp,
+          0.45 + Math.random() * 0.5, 0.9 + Math.random() * 0.9,
+          dark.r, dark.g, dark.b, 1.3, -0.5);                                     // negative grav → buoyant
+      }
+      const deb = new THREE.Color(0x5a4a30);                                      // debris chunks (fall + settle)
+      for (let i = 0; i < 8; i++) {
+        const sp = 4 + Math.random() * 7;
+        emit(_smoke, x, y, z,
+          (Math.random() * 2 - 1) * sp, Math.random() * sp + 2, (Math.random() * 2 - 1) * sp,
+          0.08 + Math.random() * 0.06, 0.7 + Math.random() * 0.6,
+          deb.r, deb.g, deb.b, 0.7, PGRAV);
+      }
+    }
+    pulseLight({ x, y: y + 0.4, z }, 0xff7a1e, (22 + r * 4) * nightBoost(), r * 7, 0.45);
+    explosionBoom(r);
+    shake(Math.min(SHAKE_MAX, 0.7 + r * 0.12));
+  } catch (e) { /* never throw out of FX */ }
+}
+function explosionBoom(r) {
+  try {
+    if (!audioReady()) return;
+    const t = _ac.currentTime;
+    tone(t, 'sine', 95, 28, 0.55, 0.55);                  // sub thump
+    noiseBurst(t, 0.5, 0.42, 'lowpass', 380, 0.5);        // body
+    noiseBurst(t, 0.12, 0.3, 'highpass', 1700, 0.6);      // crack
+  } catch (e) { /* optional */ }
+}
+
+// ============================================================
 // PUBLIC: CAMERA SHAKE + VIGNETTE
 // ============================================================
-function shake(amount) { _trauma = Math.min(SHAKE_MAX, _trauma + (amount || 0)); }
+function shake(amount) {
+  if (!_shakeEnabled) return;
+  _trauma = Math.min(SHAKE_MAX, _trauma + (amount || 0) * _shakeScale);
+}
+function setShakeScale(s) { _shakeScale = Math.max(0, Math.min(2, s == null ? 1 : s)); }
+function setShakeEnabled(b) { _shakeEnabled = !!b; if (!b) _trauma = 0; }
 
 function flash(opts) {
   try {
@@ -581,6 +714,7 @@ function init(ctx) {
     resolveHandles(ctx);
     buildParticles();
     buildCasings();
+    buildLights();
     subscribe(ctx);
     if (!_headless) ambient(true);   // start the low city bed (resumes on first gesture)
   } catch (e) { console.warn('[FX] init failed (non-fatal)', e); }
@@ -625,7 +759,7 @@ function subscribe(ctx) {
     });
     // optional precise-point events Lane A emits where it knows the exact point
     bus.on('fx:impact', (p) => { if (p && p.pos) spawnImpact(p.pos, { kind: p.kind || p.surface || 'world', normal: p.normal, scale: p.scale }); });
-    bus.on('fx:muzzle', (p) => { _explicitMuzzle = true; if (p && p.pos) { muzzleSmoke(p.pos); muzzleSparks(p.pos, p.dir); } });
+    bus.on('fx:muzzle', (p) => { _explicitMuzzle = true; if (p && p.pos) { muzzleSmoke(p.pos); muzzleSparks(p.pos, p.dir); pulseLight(p.pos, 0xffe6a8, 4.5 * nightBoost(), 8, 0.06); } });
     bus.on('fx:casing', (p) => { _explicitCasing = true; if (p && p.pos) spawnCasing(p.pos, p.dir, p.weaponId); });   // precise brass eject (Lane A)
     bus.on('fx:crash', (p) => {                                                                // car-vs-building (Lane D)
       // D emits fx:impact (metal sparks) AND fx:crash for one crash, so fx:crash adds
@@ -635,9 +769,10 @@ function subscribe(ctx) {
       skidDust(p.pos, {}); skidDust(p.pos, {});
       shake(Math.min(1.4, (Math.abs(p.speed || 0) / 22) + sev * 0.3));
     });
-    bus.on('fx:explosion', (p) => { if (p && p.pos) { spawnImpact(p.pos, { kind: 'metal', scale: 3 }); shake(1.0); } });
+    bus.on('fx:explosion', (p) => { if (p && p.pos) spawnExplosion(p.pos, p.radius); });
     bus.on('fx:spawn', (p) => { if (p && p.pos) spawnImpact(p.pos, { kind: p.kind || 'world', scale: p.scale }); });
     bus.on('pickup', () => uiClick());
+    bus.on('weapon:reload', (p) => { if (p) reloadSound(p.id || _curWeapon, p.phase, p.duration); });   // Lane A reload SFX
   } catch (e) { /* optional */ }
 }
 
@@ -645,10 +780,11 @@ function update(dt, ctx) {
   try {
     if (ctx) _ctx = ctx;
     if (!dt || dt < 0) dt = 0.016; else if (dt > 0.05) dt = 0.05;
-    if (!_built) { resolveHandles(_ctx); buildParticles(); buildCasings(); }   // lazy attach if the scene appeared late
+    if (!_built) { resolveHandles(_ctx); buildParticles(); buildCasings(); buildLights(); }   // lazy attach if the scene appeared late
     else { _camera = (_ctx && _ctx.camera) || _camera; }                       // keep the camera ref fresh
     if (_particlesOk) { stepSystem(_spark, dt); stepSystem(_smoke, dt); }
     stepCasings(dt);
+    stepLights(dt);
     autoFootsteps(dt);
     applyShake(dt);
   } catch (e) { /* never throw out of the frame loop */ }
@@ -684,6 +820,7 @@ function reset(ctx) {
       sys.aAlpha.needsUpdate = true; sys.aSize.needsUpdate = true;
     }
     if (_casings) for (const c of _casings.items) { c.life = 0; c.mesh.visible = false; }
+    if (_lights) for (const e of _lights.items) { e.life = 0; e.light.intensity = 0; e.light.visible = false; }
     if (_vignette) _vignette.style.opacity = '0';
   } catch (e) { /* optional */ }
 }
@@ -695,9 +832,9 @@ const fxSystem = {
   name: 'fx',
   init, update, reset,
   api: {
-    spawnImpact, spawnBlood, skidDust, muzzleSmoke, muzzleSparks, spawnCasing,
+    spawnImpact, spawnBlood, skidDust, muzzleSmoke, muzzleSparks, spawnCasing, spawnExplosion,
     shake, flash, gunReport, footstep, ambient, uiClick, impactThud,
-    setMuted, setVolume, reset,
+    setMuted, setVolume, setShakeScale, setShakeEnabled, reset,
   },
 };
 

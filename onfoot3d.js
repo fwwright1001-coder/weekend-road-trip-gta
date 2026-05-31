@@ -134,6 +134,9 @@ window.ONFOOT = OF;
 //   * kick(amt) — firing-recoil hook: combat owns firing, so gta/fx.js calls it each shot
 //     to kick the third-person AND first-person camera. (recoil is initialised below.)
 OF.kick = function (amt) { recoil += (amt || 0); };
+// Lane B pause/settings overlay flag (set by gta/hud-radar.js's menu). While true,
+// canvas clicks neither relock nor fire, so the menu's sliders/buttons are usable.
+OF.paused = false;
 
 // ============================================================
 // LIVING WORLD (Lane C) — day/night cycle + weather + night lighting. Lane C owns
@@ -1512,6 +1515,7 @@ function tryPointerLock() {
   } catch (err) { console.warn('[ONFOOT] pointer lock failed — use Q/E to turn', err); }
 }
 function onMouseDown(e) {
+  if (OF.paused) return;                                  // pause/settings overlay is up (Lane B): don't relock or fire
   if (!OF.active || mode !== 'foot') return;             // no shooting from the driver's seat
   if (!locked) { tryPointerLock(); return; }             // first click grabs the mouse for look; Q/E turn regardless
   if (e.button === 0) fire();
