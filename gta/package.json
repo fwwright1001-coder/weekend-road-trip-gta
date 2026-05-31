@@ -13,6 +13,10 @@
     "actor-check": "node tools/actor-check.mjs",
     "collision-probe": "node tools/collision-probe.mjs",
     "physics-check": "node tools/physics-check.mjs",
+    "police-check": "node tools/police-check.mjs",
+    "traffic-check": "node tools/traffic-check.mjs",
+    "pickups-check": "node tools/pickups-check.mjs",
+    "ped-check": "node tools/ped-check.mjs",
     "scene-stats": "node tools/scene-stats.mjs"
   },
   "devDependencies": {
