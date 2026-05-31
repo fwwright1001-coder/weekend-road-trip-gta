@@ -7,3 +7,6 @@ package-lock.json
 # scratch / OS
 *.log
 .DS_Store
+
+# per-lane parallel-build scratch (never merged to main)
+_LANE_BRIEF.md

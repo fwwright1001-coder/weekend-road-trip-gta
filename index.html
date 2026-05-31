@@ -230,10 +230,18 @@
       </div>
     </div>
   </div>
+  <!-- ============ Module load order (single owner: Lane D) ============
+       game.js (classic 2D road trip) → render3d.js (3D road-trip renderer) →
+       onfoot3d.js (on-foot HOST; defines window.ONFOOT) → onfoot-bridge.js.
+       The bridge is the SOLE entry point for the whole gta/ module graph: it
+       statically imports core/wanted/economy/police/combat/hud-radar/heist/detail
+       and dynamic-imports the browser-only realism pipeline + gta/fx.js (Lane B's
+       particle layer). So new gta/* modules are wired by the bridge's imports —
+       do NOT add per-module <script> tags here (fx.js especially: it needs the
+       runtime ctx and is loaded lazily + defensively from the bridge). -->
   <script src="game.js"></script>
   <script type="module" src="render3d.js"></script>
   <script type="module" src="onfoot3d.js"></script>
-  <!-- Crime-sandbox systems layer (wanted/police/economy/missions/radar) bolted onto on-foot mode -->
   <script type="module" src="gta/onfoot-bridge.js"></script>
 </body>
 </html>

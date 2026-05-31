@@ -26,6 +26,50 @@ click to capture the mouse · `WASD` walk · mouse look · **click** shoot · `R
 
 Vanilla HTML5 + Canvas 2D + Three.js (r0.170, via CDN import map). Single folder, zero build. Repo: https://github.com/fwwright1001-coder/weekend-road-trip-gta
 
+## Module map
+
+Four top-level pieces, loaded in order by `index.html` (no bundler):
+
+| File | What it is |
+|---|---|
+| `game.js` | The 2D Canvas road-trip game (classic script). |
+| `render3d.js` | Optional Three.js renderer for the road trip — press `T` to toggle. |
+| `onfoot3d.js` | The on-foot ("GTA") **host**: scene, camera, third-person controller, town, pedestrians, driving, the base pistol. Exposes `window.ONFOOT`. |
+| `gta/` | The crime-sandbox **systems layer**, loaded as one ES-module graph through `gta/onfoot-bridge.js`. |
+
+Inside `gta/`, every system shares the same `{name, init, update, reset, api}` shape and talks only over an event bus, so they interlock without colliding:
+
+- `core.js` — the spine: `GTA` namespace, event bus, system registry, math utils.
+- `onfoot-bridge.js` — integration host: builds the shared `ctx` from `ONFOOT.internals`, registers systems, owns combat input + screen feedback + pickups, and is the single entry that imports everything below.
+- `combat.js` (weapons/firing/ammo) · `wanted.js` (stars) · `police.js` (cop AI) · `economy.js` (money + pickups) · `hud-radar.js` (HUD + minimap) · `onfoot-heist.js` + `onfoot-bank.js` (the bank-heist mission) · `onfoot-detail.js` / `onfoot-textures.js` / `onfoot-actors.js` (props, textures, rigged NPCs) · `onfoot-render.js` (browser-only realism post-FX) · `fx.js` (optional particle/screen FX).
+
+## Run it locally
+
+Static site, no build step:
+
+```bash
+python -m http.server 8000
+# http://localhost:8000/       the road trip
+# http://localhost:8000/#gta   straight into on-foot GTA mode
+```
+
+## Headless checks (Node)
+
+The `gta/` layer ships a Node self-verify suite (no browser, no GPU):
+
+```bash
+cd gta
+npm install      # one-time — pulls three (a devDependency, for the harness only)
+npm run smoke    # full suite: inspector checks + the end-to-end heist sim across seeds
+```
+
+`npm run smoke` runs the procedural-mesh, collision, scene-cost, rig, and actor
+checks plus the complete heist simulation, and exits non-zero on any real failure.
+Checks that depend on an asset not present yet are **skipped, not failed**, so the
+suite stays green during parallel development. Individual tools are also wired:
+`npm run sim` · `npm run collision-probe` · `npm run scene-stats` · `npm run mesh-check`
+· `npm run aim-check` · `npm run actor-check`.
+
 ---
 
 *An experimental fork of the ENGR 5513 submission game (Lipscomb MSAI). Forrest Wright, 2026.*
