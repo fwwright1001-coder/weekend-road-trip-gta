@@ -123,10 +123,15 @@ export function buildNashville(THREE, scene, opts = {}) {
   function signPanel(text, w, h, opts = {}) {
     const tex = signTexture(text, opts);
     const mat = tex
-      ? new THREE.MeshBasicMaterial({ map: tex, transparent: false })
+      ? new THREE.MeshBasicMaterial({ map: tex })
       : neonMat(opts.fg ? new THREE.Color(opts.fg).getHex() : 0xff39a8);
+    mat.side = THREE.FrontSide;
     const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
-    m.material.side = THREE.DoubleSide;
+    // Signs mount on the buildings' north (−Z) faces. A PlaneGeometry's text only
+    // reads correctly from its +Z side, so rotate 180° about Y to point the front
+    // at the street/plaza the player views from — otherwise they see the mirrored
+    // back of the plane. FrontSide then hides the (mirrored) back entirely.
+    m.rotation.y = Math.PI;
     return m;
   }
 
@@ -295,7 +300,7 @@ export function buildNashville(THREE, scene, opts = {}) {
     g.add(box(W, H, D, new THREE.MeshStandardMaterial({ color: wallTone, roughness: 0.85 }), 0, H / 2, 0));
     // lit ground-floor windows / doorway glow (facing −Z, toward the street)
     const glow = new THREE.Mesh(new THREE.PlaneGeometry(W * 0.8, 2.4), neonMat(0xffe1a8));
-    glow.position.set(0, 1.5, -D / 2 - 0.02); g.add(glow);
+    glow.position.set(0, 1.5, -D / 2 - 0.02); glow.rotation.y = Math.PI; g.add(glow);
     // horizontal marquee over the door
     const marquee = signPanel(name, W * 0.92, 1.6, { fg: color, bg: '#0c0010', wpx: 512, hpx: 120 });
     marquee.position.set(0, H - 1.3, -D / 2 - 0.05); g.add(marquee);
