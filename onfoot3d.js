@@ -22,6 +22,10 @@
 // Y is height, feet rest at Y=0. Camera is a third-person orbit behind the guy.
 // ============================================================
 import * as THREE from 'three';
+// Re-skins the procedural town as downtown Nashville (landmarks + neon Broadway +
+// river/bridge/skyline). Self-contained; the call below is try/caught so a failure
+// in city-dressing can never brick the base mode.
+import { buildNashville } from './gta/onfoot-nashville.js';
 
 // ---- tunables --------------------------------------------------------------
 const WALK = 4.4;            // player walk speed (units/s)
@@ -337,7 +341,8 @@ function buildBuilding(rng) {
   const g = new THREE.Group();
   const h = 6 + rng() * 18;
   const w = 7 + rng() * 5, d = 7 + rng() * 5;
-  const tones = [0x6b7280, 0x7a6f63, 0x5c6b7a, 0x736a78, 0x6f7a6a];
+  // downtown-Nashville fabric: steel-blue & dark glass, limestone/tan, slate, brick
+  const tones = [0x4a6472, 0x39474f, 0x8a7e64, 0x7d4f3e, 0x5d6770, 0x9a9180];
   const tone = tones[(rng() * tones.length) | 0];
   const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d),
     new THREE.MeshStandardMaterial({ color: tone, roughness: 0.9 }));
@@ -562,16 +567,17 @@ function ensureInit() {
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
   scene = new THREE.Scene();
-  // warm coastal dusk to match the end-of-trip mood
-  scene.background = new THREE.Color('#f3b066');
-  scene.fog = new THREE.Fog('#f3b066', 70, 320);
+  // Nashville blue-hour: a warm sunset haze near the ground deepening to dusk,
+  // pushed back so the downtown skyline + landmarks read before they fade.
+  scene.background = new THREE.Color('#dd8f55');
+  scene.fog = new THREE.Fog('#d49a6e', 90, 380);
 
   camera = new THREE.PerspectiveCamera(62, 16 / 9, 0.1, 1200);
 
   // sky dome (gradient, ignores fog so the horizon stays clean)
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false,
-    uniforms: { topColor: { value: new THREE.Color('#5a7fb0') }, horizonColor: { value: new THREE.Color('#f6c78a') }, exponent: { value: 0.9 } },
+    uniforms: { topColor: { value: new THREE.Color('#37406b') }, horizonColor: { value: new THREE.Color('#f2a35a') }, exponent: { value: 0.8 } },
     vertexShader: 'varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
     fragmentShader: 'varying vec3 vDir; uniform vec3 topColor; uniform vec3 horizonColor; uniform float exponent; void main(){ float t = pow(clamp(vDir.y,0.0,1.0), exponent); gl_FragColor = vec4(mix(horizonColor, topColor, t), 1.0); }',
   });
@@ -612,6 +618,9 @@ function ensureInit() {
     for (let gz = -2; gz <= 2; gz++) {
       if (gx === 0 && gz === 0) continue;           // spawn plaza, kept open
       if (gx === 0 && (gz === -1 || gz === -2)) continue;  // open corridor to the bank (gta heist)
+      // cells reserved for Nashville hero landmarks (built in gta/onfoot-nashville.js):
+      //   (-1,-1) Batman Building · (0,1) Hall of Fame · (1,0) Ryman
+      if ((gx === -1 && gz === -1) || (gx === 0 && gz === 1) || (gx === 1 && gz === 0)) continue;
       if (rng() < 0.18) continue;                   // occasional empty lot
       const cx = gx * CELL, cz = gz * CELL;
       const { mesh, w, d } = buildBuilding(rng);
@@ -631,6 +640,14 @@ function ensureInit() {
       }
     }
   }
+
+  // Re-skin the whole town as downtown Nashville: hero landmarks (in the reserved
+  // cells above), a neon Lower-Broadway strip, the Cumberland River + pedestrian
+  // bridge, the Capitol on its hill and a downtown skyline. Registers landmark
+  // collision onto `aabbs` (so peds below route around them). Try/caught so any
+  // failure leaves the plain town intact rather than bricking the mode.
+  try { buildNashville(THREE, scene, { aabbs, bound: BOUND, cell: CELL }); }
+  catch (e) { console.error('[ONFOOT] Nashville dressing failed; plain town', e); }
 
   // drivable cars: the red convertible at the plaza + parked cars on the streets
   // (x=±12 / z=±12 sit in the cross-streets between the building blocks)
